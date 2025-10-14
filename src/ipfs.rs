@@ -58,62 +58,6 @@ impl IpfsStorage {
         }
     }
     
-    /// Create a new IPFS storage instance with its own Iroh node
-    /// 
-    /// # Arguments
-    /// * `data_dir` - Directory for persistent storage
-    /// * `secret_key` - Optional secret key for persistent node identity
-    /// 
-    /// **Note**: Prefer using `from_components()` to share a single Iroh node
-    /// across your application for better resource efficiency.
-    /// 
-    /// This creates an Iroh node with:
-    /// - Content-addressed blob storage using Blake3
-    /// - P2P networking for content discovery
-    /// - QUIC transport for efficient transfers
-    pub async fn new(data_dir: &Path, secret_key: Option<SecretKey>) -> Result<Self> {
-        tracing::info!("Initializing IPFS storage with Iroh at {:?}", data_dir);
-        
-        // Create data directory if it doesn't exist
-        tokio::fs::create_dir_all(data_dir).await?;
-        
-        // Use provided secret key or generate a new one
-        let secret_key = secret_key.unwrap_or_else(|| {
-            let key = SecretKey::generate(&mut rand::thread_rng());
-            tracing::info!("Generated new secret key for Iroh node");
-            key
-        });
-        
-        // Create endpoint with P2P discovery
-        let endpoint = Endpoint::builder()
-            .discovery_n0()  // Enable n0 discovery for peer finding
-            .secret_key(secret_key)
-            .bind()
-            .await?;
-        
-        tracing::info!("Iroh endpoint created");
-        tracing::info!("Node ID: {}", endpoint.node_id());
-        
-        // Load or create file system store
-        let store = FsStore::load(data_dir).await?;
-        tracing::info!("Blob store loaded from {:?}", data_dir);
-        
-        // Create blobs protocol handler
-        let blobs = BlobsProtocol::new(&store, None);
-        
-        // Build router with blob protocol support
-        let router = Router::builder(endpoint)
-            .accept(BLOBS_ALPN, blobs.clone())
-            .spawn();
-        
-        tracing::info!("Iroh node initialized successfully");
-        
-        Ok(Self {
-            router,
-            blobs,
-            store,
-        })
-    }
     
     /// Get the node ID of this Iroh instance
     pub fn node_id(&self) -> iroh::NodeId {
