@@ -1,0 +1,101 @@
+# Rust build artifacts
+/target
+/Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Configuration files (may contain sensitive data)
+config.toml
+config.json
+
+# Redis database files
+dump.rdb
+appendonly.aof
+*.rdb
+*.aof
+redis_data/
+
+# IPFS data
+.ipfs/
+ipfs_data/
+*.ipfs
+
+# MQTT data
+mqtt_data/
+*.mqtt
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# OS files
+Thumbs.db
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Testing and coverage
+coverage/
+*.profraw
+tarpaulin-report.html
+
+# Documentation build
+/doc/
+/docs/_build/
+
+# Backup and temporary files
+*.bak
+*.backup
+*.tmp
+*.swp
+.#*
+\#*#
+
+# Database dumps
+*.db
+*.sqlite
+*.sqlite3
+
+# Node.js (if using any JS tooling)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# Python (if using any Python scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Custom directories
+local/
+temp/
+scratch/
+data/

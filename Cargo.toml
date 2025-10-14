@@ -1,0 +1,59 @@
+[package]
+name = "cyberfly-rust-node"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-stream = "0.1"
+
+
+# Redis client
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "streams"] }
+
+# GraphQL
+async-graphql = "7.0"
+async-graphql-axum = "7.0"
+axum = "0.8"
+
+# Signature verification
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+signature = "2.2"
+
+# CRDT
+automerge = "0.6"
+
+# IPFS - Using Iroh (modern Rust IPFS implementation)
+# Upgraded to 0.93 for latest features and compatibility
+iroh = { version = "0.93", features = ["discovery-local-network"] }
+iroh-blobs = "0.95"
+iroh-gossip = "0.93"
+dashmap = "6.0"
+
+# MQTT
+rumqttc = "0.24"
+tokio-util = "0.7"
+chrono = "0.4"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+hex = "0.4"
+base64 = "0.22"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+sha2 = "0.10"
+md5 = "0.7"
+rand = "0.9"
+
+[dev-dependencies]
