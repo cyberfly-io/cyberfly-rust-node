@@ -472,6 +472,12 @@ impl IrohNetwork {
                 // Only parse as GossipMessage on the data topic
                 // Discovery and sync topics have different message formats
                 if topic_type == "data" {
+                    // If DEBUG_GOSSIP_RAW is set, dump the raw payload (base64)
+                    if std::env::var("DEBUG_GOSSIP_RAW").is_ok() {
+                        use base64::Engine;
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(&msg.content);
+                        tracing::info!("RAW_GOSSIP_PAYLOAD(base64) from {}: {}", from, encoded);
+                    }
                     // Try to parse as GossipMessage
                     match serde_json::from_slice::<GossipMessage>(&msg.content) {
                         Ok(gossip_msg) => {
@@ -537,7 +543,14 @@ impl IrohNetwork {
                             });
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to parse gossip message as GossipMessage: {} ({} bytes from {})", e, msg.content.len(), from);
+                            // If DEBUG_GOSSIP_RAW is set, include the base64 payload in the warning
+                            if std::env::var("DEBUG_GOSSIP_RAW").is_ok() {
+                                use base64::Engine;
+                                let encoded = base64::engine::general_purpose::STANDARD.encode(&msg.content);
+                                tracing::warn!("Failed to parse gossip message as GossipMessage: {} ({} bytes from {}) - raw(base64): {}", e, msg.content.len(), from, encoded);
+                            } else {
+                                tracing::warn!("Failed to parse gossip message as GossipMessage: {} ({} bytes from {})", e, msg.content.len(), from);
+                            }
                         }
                     }
                 } else {
