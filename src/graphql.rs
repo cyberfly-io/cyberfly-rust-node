@@ -929,15 +929,6 @@ impl MutationRoot {
             let _ = mqtt_to_gossip.send(mg_msg);
         }
         
-        // Also broadcast to GraphQL subscribers
-        if let Ok(broadcast_tx) = ctx.data::<broadcast::Sender<MessageEvent>>() {
-            let event = MessageEvent {
-                topic: topic.clone(),
-                payload: payload_bytes,
-                timestamp: (timestamp / 1_000_000) as i64, // Convert microseconds to seconds
-            };
-            let _ = broadcast_tx.send(event); // Ignore error if no subscribers
-        }
         
         Ok(IotPublishResult {
             success: true,
