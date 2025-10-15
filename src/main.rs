@@ -184,7 +184,7 @@ async fn main() -> Result<()> {
     // Create broadcast channel for real-time message subscriptions first
     let (message_broadcast_tx, _message_broadcast_rx) = tokio::sync::broadcast::channel(1000);
     
-    let (mqtt_tx, mqtt_store) = if config.mqtt_config.enabled {
+    let (mqtt_tx, mqtt_store, mqtt_to_gossip_tx) = if config.mqtt_config.enabled {
         tracing::info!("Initializing MQTT bridge...");
         
         // Use Iroh node ID as MQTT client ID for consistent identification
@@ -199,7 +199,7 @@ async fn main() -> Result<()> {
         
         tracing::info!("MQTT client ID: {}", mqtt_client_id);
         
-    let (mut mqtt_bridge, gossip_to_mqtt_tx, mqtt_eventloop) = mqtt_bridge::MqttBridge::new(bridge_config)?;
+    let (mut mqtt_bridge, gossip_to_mqtt_tx, mqtt_to_gossip_tx, mqtt_eventloop) = mqtt_bridge::MqttBridge::new(bridge_config)?;
     let mqtt_to_gossip_rx = mqtt_bridge.get_mqtt_to_gossip_receiver();
         
         // Connect MQTT bridge to Iroh network
@@ -252,10 +252,11 @@ async fn main() -> Result<()> {
         });
         
     tracing::info!("MQTT bridge initialized and connected to Iroh network");
-    (Some(gossip_to_mqtt_tx), Some(mqtt_store))
+    // Pass both directions: gossip_to_mqtt_tx (gossip->mqtt) and mqtt_to_gossip_tx (mqtt->gossip)
+    (Some(gossip_to_mqtt_tx), Some(mqtt_store), Some(mqtt_to_gossip_tx))
     } else {
         tracing::info!("MQTT bridge disabled");
-        (None, None)
+        (None, None, None)
     };
     
     // For GraphQL queries, pass the endpoint directly instead of the network
@@ -272,6 +273,7 @@ async fn main() -> Result<()> {
         Some(endpoint_for_graphql),  // Pass endpoint instead of wrapped network
         Some(discovered_peers_map),  // Pass discovered peers map
         mqtt_tx, 
+        mqtt_to_gossip_tx,
         mqtt_store,
         Some(message_broadcast_tx.clone())
     ).await?;

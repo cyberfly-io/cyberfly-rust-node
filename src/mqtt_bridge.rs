@@ -136,7 +136,7 @@ impl MqttBridge {
     }
     
     /// Create a new MQTT bridge
-    pub fn new(config: MqttBridgeConfig) -> Result<(Self, mpsc::UnboundedSender<GossipToMqttMessage>, EventLoop)> {
+    pub fn new(config: MqttBridgeConfig) -> Result<(Self, mpsc::UnboundedSender<GossipToMqttMessage>, mpsc::UnboundedSender<MqttToGossipMessage>, EventLoop)> {
         let mut mqttoptions = MqttOptions::new(
             &config.client_id,
             &config.broker_host,
@@ -152,7 +152,7 @@ impl MqttBridge {
         let bridge = Self {
             client,
             config,
-            mqtt_to_gossip_tx,
+            mqtt_to_gossip_tx: mqtt_to_gossip_tx.clone(),
             mqtt_to_gossip_rx,
             gossip_to_mqtt_rx,
             seen_payloads: VecDeque::new(),
@@ -164,7 +164,7 @@ impl MqttBridge {
             recent_message_ttl: 30000,  // 30 seconds TTL for recent messages
         };
         
-        Ok((bridge, gossip_to_mqtt_tx, eventloop))
+        Ok((bridge, gossip_to_mqtt_tx, mqtt_to_gossip_tx, eventloop))
     }
 
     /// Purge expired entries from recently_published set using the queue
@@ -239,7 +239,12 @@ impl MqttBridge {
                                 payload,
                                 message_id,
                             };
-                            
+
+                            // Log and forward to gossip network. This log includes the
+                            // message_id and topic so it's easy to correlate with the
+                            // network side logs (forward_mqtt_to_gossip).
+                            tracing::info!("🔄 Forwarding MQTT->gossip - topic: {}, message_id: {}", message.topic, message.message_id);
+
                             if let Err(e) = self.mqtt_to_gossip_tx.send(message) {
                                 tracing::error!("Failed to forward MQTT message to gossip: {}", e);
                             } else {

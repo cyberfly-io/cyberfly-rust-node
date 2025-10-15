@@ -916,7 +916,18 @@ impl MutationRoot {
             origin: MessageOrigin::Gossip,  // Originated from GraphQL API (gossip side)
         };
         
-        mqtt_tx.send(message).map_err(|e| DbError::InternalError(format!("Failed to send to MQTT: {}", e)))?;
+    mqtt_tx.send(message.clone()).map_err(|e| DbError::InternalError(format!("Failed to send to MQTT: {}", e)))?;
+
+        // Also forward this publish into the gossip network so other peers receive it.
+        if let Ok(mqtt_to_gossip) = ctx.data::<mpsc::UnboundedSender<crate::mqtt_bridge::MqttToGossipMessage>>() {
+            let mg_msg = crate::mqtt_bridge::MqttToGossipMessage {
+                topic: topic.clone(),
+                payload: payload_bytes.clone(),
+                message_id: message.message_id.clone(),
+            };
+            // Best-effort send; ignore failures to avoid failing the GraphQL mutation
+            let _ = mqtt_to_gossip.send(mg_msg);
+        }
         
         // Also broadcast to GraphQL subscribers
         if let Ok(broadcast_tx) = ctx.data::<broadcast::Sender<MessageEvent>>() {
@@ -1084,6 +1095,7 @@ pub async fn create_server(
     endpoint: Option<iroh::Endpoint>,  // Pass Endpoint instead of wrapped IrohNetwork
     discovered_peers: Option<Arc<dashmap::DashMap<iroh::NodeId, chrono::DateTime<chrono::Utc>>>>,  // Discovered peers map
     mqtt_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::GossipToMqttMessage>>,
+    mqtt_to_gossip_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::MqttToGossipMessage>>,
     mqtt_store: Option<crate::mqtt_bridge::MqttMessageStore>,
     message_broadcast: Option<broadcast::Sender<MessageEvent>>,
 ) -> Result<Router> {
@@ -1118,6 +1130,9 @@ pub async fn create_server(
     // Add MQTT components if available
     if let Some(tx) = mqtt_tx {
         schema_builder = schema_builder.data(tx);
+    }
+    if let Some(tx2) = mqtt_to_gossip_tx {
+        schema_builder = schema_builder.data(tx2);
     }
     if let Some(store) = mqtt_store {
         schema_builder = schema_builder.data(store);
