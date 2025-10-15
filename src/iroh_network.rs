@@ -2,7 +2,7 @@
 // Replaces libp2p with Iroh's Endpoint + Router + Gossip + Blobs
 
 use anyhow::Result;
-use iroh::{Endpoint, NodeId, SecretKey, protocol::Router, Watcher};
+use iroh::{Endpoint, NodeId, SecretKey, protocol::Router};
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_gossip::{
     net::Gossip, 
@@ -502,7 +502,7 @@ impl IrohNetwork {
                                     
                                     let mqtt_msg = Libp2pToMqttMessage {
                                         topic: mqtt_topic.clone(),
-                                        payload: actual_data,
+                                        payload: actual_data.clone(),
                                         message_id: gossip_msg.message_id.clone(),
                                         origin: MessageOrigin::Libp2p,  // Mark as Libp2p so it gets published on remote peers
                                         qos: QoS::AtMostOnce,
@@ -521,7 +521,7 @@ impl IrohNetwork {
                                 if let Some(ref tx) = libp2p_to_mqtt_tx {
                                     let mqtt_msg = Libp2pToMqttMessage {
                                         topic: format!("iroh/{}", topic_type),
-                                        payload: actual_data,
+                                        payload: actual_data.clone(),
                                         message_id: gossip_msg.message_id.clone(),
                                         origin: MessageOrigin::Libp2p,
                                         qos: QoS::AtMostOnce,

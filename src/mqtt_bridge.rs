@@ -103,7 +103,7 @@ impl MqttBridge {
     
     /// Check if we've seen this payload recently (within dedup window)
     fn is_duplicate(&mut self, topic: &str, payload: &[u8]) -> bool {
-        let payload_hash = Self::hash_payload(topic, payload);
+        let payload_hash = Self::get_message_hash(topic, payload);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
