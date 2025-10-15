@@ -316,6 +316,16 @@ impl MqttBridge {
                         self.recently_published_queue.push_back((message_hash.clone(), expiry));
                         // Purge expired entries synchronously here (fast operation)
                         self.purge_expired_recently_published();
+
+                        // Also store the message for GraphQL subscriptions. Some MQTT
+                        // brokers do not deliver a published message back to the
+                        // same client, so we must persist it here so the GraphQL
+                        // subscription broadcaster can pick it up.
+                        if let Some(ref store) = self.message_store {
+                            // Best-effort: ignore errors to avoid crashing the bridge
+                            let _ = store.add_message(message.topic.clone(), message.payload.clone()).await;
+                            tracing::debug!("Stored gossip->MQTT published message for GraphQL subscriptions - topic: {}", message.topic);
+                        }
                     }
                 }
             }
