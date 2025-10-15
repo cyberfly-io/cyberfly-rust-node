@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
     
     let endpoint = iroh::Endpoint::builder()
         .discovery_n0()  // Enable n0 DNS discovery for peer finding
-        .discovery_dht()  // Enable DHT discovery for peer finding
+       //discovery_dht()  // Enable DHT discovery for peer finding
         .discovery_local_network()  // Enable local network discovery (mDNS)
         .secret_key(secret_key)
         .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::empty()))  // Enable relay mode
