@@ -207,19 +207,36 @@ async fn main() -> Result<()> {
         
         // Create message store for GraphQL queries and wire broadcast for subscriptions
         let mqtt_store = mqtt_bridge::MqttMessageStore::new(1000);
+        
+        // Set the message store on the MQTT bridge so it can store incoming messages
+        mqtt_bridge.set_message_store(mqtt_store.clone());
+        
         let mqtt_store_clone = mqtt_store.clone();
         let broadcast_clone = message_broadcast_tx.clone();
         
         // Forward MQTT messages to broadcast channel for subscriptions
         tokio::spawn(async move {
+            let mut last_processed_timestamp = chrono::Utc::now().timestamp();
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
             loop {
                 interval.tick().await;
-                let messages = mqtt_store_clone.get_messages(None, Some(10)).await;
-                for msg in messages {
+                
+                // Get all messages since last processed timestamp
+                let all_messages = mqtt_store_clone.get_messages(None, None).await;
+                let new_messages: Vec<_> = all_messages.into_iter()
+                    .filter(|msg| msg.timestamp > last_processed_timestamp)
+                    .collect();
+                
+                // Update last processed timestamp
+                if let Some(latest_msg) = new_messages.last() {
+                    last_processed_timestamp = latest_msg.timestamp;
+                }
+                
+                // Send new messages to broadcast channel
+                for msg in new_messages {
                     let event = graphql::MessageEvent {
-                        topic: msg.topic,
-                        payload: msg.payload,
+                        topic: msg.topic.clone(),
+                        payload: msg.payload.clone(),
                         timestamp: msg.timestamp as i64,
                     };
                     let _ = broadcast_clone.send(event); // Ignore if no subscribers

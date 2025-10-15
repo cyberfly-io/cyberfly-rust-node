@@ -67,6 +67,7 @@ pub struct MqttBridge {
     seen_payloads: VecDeque<PayloadHash>,  // Time-based deduplication queue
     dedup_window_secs: u64,  // How long to remember payload hashes (in seconds)
     connected: bool,  // Track connection state
+    message_store: Option<MqttMessageStore>,  // Store for GraphQL subscriptions
 }
 
 impl MqttBridge {
@@ -149,9 +150,15 @@ impl MqttBridge {
             seen_payloads: VecDeque::new(),
             dedup_window_secs: 300,  // 5 minutes deduplication window
             connected: false,
+            message_store: None,
         };
         
         Ok((bridge, libp2p_to_mqtt_tx, eventloop))
+    }
+    
+    /// Set the message store for GraphQL subscriptions
+    pub fn set_message_store(&mut self, store: MqttMessageStore) {
+        self.message_store = Some(store);
     }
     
     /// Subscribe to MQTT topics
@@ -222,7 +229,13 @@ impl MqttBridge {
                             // Generate unique message ID
                             let message_id = Self::generate_message_id(&topic, &payload);
                             
-                            tracing::debug!("Received MQTT message on topic: {}", topic);
+                            tracing::info!("📨 Received MQTT message - topic: {}, payload_size: {}", topic, payload.len());
+                            
+                            // Store message for GraphQL subscriptions
+                            if let Some(ref store) = self.message_store {
+                                store.add_message(topic.clone(), payload.clone()).await;
+                                tracing::debug!("Stored MQTT message for GraphQL subscriptions");
+                            }
                             
                             // Forward to libp2p - keep original MQTT topic for propagation
                             let message = MqttToLibp2pMessage {
@@ -233,6 +246,8 @@ impl MqttBridge {
                             
                             if let Err(e) = self.mqtt_to_libp2p_tx.send(message) {
                                 tracing::error!("Failed to forward MQTT message to libp2p: {}", e);
+                            } else {
+                                tracing::info!("✅ Forwarded MQTT message to libp2p network");
                             }
                         }
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
