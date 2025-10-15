@@ -220,9 +220,9 @@ impl MqttBridge {
                             
                             tracing::info!("📨 Received MQTT message - topic: {}, payload_size: {}", topic, payload.len());
                             
-                            // Store message for GraphQL subscriptions
+                            // Store message for GraphQL subscriptions (include message_id)
                             if let Some(ref store) = self.message_store {
-                                store.add_message(topic.clone(), payload.clone()).await;
+                                store.add_message(topic.clone(), payload.clone(), Some(message_id.clone())).await;
                                 tracing::debug!("Stored MQTT message for GraphQL subscriptions");
                             }
                             
@@ -322,8 +322,8 @@ impl MqttBridge {
                         // same client, so we must persist it here so the GraphQL
                         // subscription broadcaster can pick it up.
                         if let Some(ref store) = self.message_store {
-                            // Best-effort: ignore errors to avoid crashing the bridge
-                            let _ = store.add_message(message.topic.clone(), message.payload.clone()).await;
+                            // Best-effort: include the message_id from gossip metadata when storing
+                            let _ = store.add_message(message.topic.clone(), message.payload.clone(), Some(message.message_id.clone())).await;
                             tracing::debug!("Stored gossip->MQTT published message for GraphQL subscriptions - topic: {}", message.topic);
                         }
                     }
@@ -357,6 +357,7 @@ pub struct MqttMessage {
     pub topic: String,
     pub payload: Vec<u8>,
     pub timestamp: i64,
+    pub message_id: String,
 }
 
 impl MqttMessageStore {
@@ -367,13 +368,15 @@ impl MqttMessageStore {
         }
     }
     
-    pub async fn add_message(&self, topic: String, payload: Vec<u8>) {
+    pub async fn add_message(&self, topic: String, payload: Vec<u8>, message_id: Option<String>) {
         let mut messages = self.messages.write().await;
-        
+        let msg_id = message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
         let message = MqttMessage {
             topic,
             payload,
             timestamp: chrono::Utc::now().timestamp(),
+            message_id: msg_id,
         };
         
         messages.push(message);

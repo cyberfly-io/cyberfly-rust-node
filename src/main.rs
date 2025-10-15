@@ -218,28 +218,41 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let mut last_processed_timestamp = chrono::Utc::now().timestamp();
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+            // Track message_ids we've already broadcast to avoid sending duplicates
+            let mut seen_message_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
             loop {
                 interval.tick().await;
-                
+
                 // Get all messages since last processed timestamp
                 let all_messages = mqtt_store_clone.get_messages(None, None).await;
                 let new_messages: Vec<_> = all_messages.into_iter()
                     .filter(|msg| msg.timestamp > last_processed_timestamp)
                     .collect();
-                
+
                 // Update last processed timestamp
                 if let Some(latest_msg) = new_messages.last() {
                     last_processed_timestamp = latest_msg.timestamp;
                 }
-                
-                // Send new messages to broadcast channel
+
+                // Send new messages to broadcast channel, deduping by message_id
                 for msg in new_messages {
+                    // If message_id exists and we've already sent it, skip
+                    if !msg.message_id.is_empty() && seen_message_ids.contains(&msg.message_id) {
+                        continue;
+                    }
+
                     let event = graphql::MessageEvent {
                         topic: msg.topic.clone(),
                         payload: msg.payload.clone(),
                         timestamp: msg.timestamp as i64,
                     };
-                    let _ = broadcast_clone.send(event); // Ignore if no subscribers
+
+                    if let Ok(_) = broadcast_clone.send(event) {
+                        if !msg.message_id.is_empty() {
+                            seen_message_ids.insert(msg.message_id.clone());
+                        }
+                    }
                 }
             }
         });
