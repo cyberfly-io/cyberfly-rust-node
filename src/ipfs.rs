@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::fs;
 use serde::{Deserialize, Serialize};
 use iroh::{Endpoint, SecretKey, protocol::Router};
-use iroh_blobs::{Hash, BlobsProtocol, store::fs::FsStore, ALPN as BLOBS_ALPN};
+use iroh_blobs::{Hash, BlobsProtocol, store::fs::FsStore};
 
 /// File metadata stored alongside IPFS content
 #[derive(Debug, Clone, Serialize, Deserialize)]

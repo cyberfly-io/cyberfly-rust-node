@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use iroh::{Endpoint, NodeId, SecretKey, protocol::Router, Watcher};
-use iroh_blobs::{BlobsProtocol, store::fs::FsStore, ALPN as BLOBS_ALPN};
+use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_gossip::{
     net::Gossip, 
     proto::TopicId,
@@ -452,7 +452,7 @@ impl IrohNetwork {
         match event {
             GossipEvent::Received(msg) => {
                 let from = msg.delivered_from;
-                tracing::debug!("Received gossip message from {} on {} topic", from, topic_type);
+                tracing::info!("📡 Received gossip message from {} on {} topic ({} bytes)", from, topic_type, msg.content.len());
 
                 // Ignore our own messages
                 if from == node_id {
@@ -463,63 +463,62 @@ impl IrohNetwork {
                 discovered_peers.insert(from, chrono::Utc::now());
 
                 // Try to parse as GossipMessage
-                if let Ok(gossip_msg) = serde_json::from_slice::<GossipMessage>(&msg.content) {
-                    tracing::info!("📨 Received gossip message - origin: {}, topic: {:?}, from: {}", 
-                        gossip_msg.origin, gossip_msg.topic, from);
-                    
-                    // Forward MQTT messages to MQTT broker on other machines
-                    // Messages originating from MQTT should be published to MQTT on remote peers
-                    // Mark as Libp2p origin so mqtt_bridge.rs will publish them
-                    // Deduplication in mqtt_bridge.rs prevents actual loops
-                    if gossip_msg.origin == "mqtt" {
-                        if let Some(ref tx) = libp2p_to_mqtt_tx {
-                            // Use the original MQTT topic from the message
-                            let mqtt_topic = gossip_msg.topic.clone()
-                                .unwrap_or_else(|| format!("iroh/{}", topic_type));
-                            
-                            tracing::info!("🔀 Forwarding gossip MQTT message to MQTT broker - topic: {}", mqtt_topic);
-                            
-                            let mqtt_msg = Libp2pToMqttMessage {
-                                topic: mqtt_topic.clone(),
-                                payload: gossip_msg.payload.clone(),
-                                message_id: gossip_msg.message_id.clone(),
-                                origin: MessageOrigin::Libp2p,  // Mark as Libp2p so it gets published on remote peers
-                                qos: QoS::AtMostOnce,
-                            };
-                            
-                            if let Err(e) = tx.send(mqtt_msg) {
-                                tracing::error!("❌ Failed to send to MQTT bridge: {}", e);
+                match serde_json::from_slice::<GossipMessage>(&msg.content) {
+                    Ok(gossip_msg) => {
+                        tracing::info!("📨 Received gossip message - origin: {}, topic: {:?}, from: {}", 
+                            gossip_msg.origin, gossip_msg.topic, from);
+                        
+                        // Forward MQTT messages to MQTT broker on other machines
+                        // Messages originating from MQTT should be published to MQTT on remote peers
+                        // Mark as Libp2p origin so mqtt_bridge.rs will publish them
+                        // Deduplication in mqtt_bridge.rs prevents actual loops
+                        if gossip_msg.origin == "mqtt" {
+                            if let Some(ref tx) = libp2p_to_mqtt_tx {
+                                // Use the original MQTT topic from the message
+                                let mqtt_topic = gossip_msg.topic.clone()
+                                    .unwrap_or_else(|| format!("iroh/{}", topic_type));
+                                
+                                tracing::info!("🔀 Forwarding gossip MQTT message to MQTT broker - topic: {}", mqtt_topic);
+                                
+                                let mqtt_msg = Libp2pToMqttMessage {
+                                    topic: mqtt_topic.clone(),
+                                    payload: gossip_msg.payload.clone(),
+                                    message_id: gossip_msg.message_id.clone(),
+                                    origin: MessageOrigin::Libp2p,  // Mark as Libp2p so it gets published on remote peers
+                                    qos: QoS::AtMostOnce,
+                                };
+                                
+                                if let Err(e) = tx.send(mqtt_msg) {
+                                    tracing::error!("❌ Failed to send to MQTT bridge: {}", e);
+                                } else {
+                                    tracing::info!("✅ Sent to MQTT bridge - topic: {}", mqtt_topic);
+                                }
                             } else {
-                                tracing::info!("✅ Sent to MQTT bridge - topic: {}", mqtt_topic);
+                                tracing::warn!("⚠️  No MQTT bridge connected");
                             }
                         } else {
-                            tracing::warn!("⚠️  No MQTT bridge connected");
+                            // For non-MQTT messages, forward to MQTT with iroh/ prefix
+                            if let Some(ref tx) = libp2p_to_mqtt_tx {
+                                let mqtt_msg = Libp2pToMqttMessage {
+                                    topic: format!("iroh/{}", topic_type),
+                                    payload: gossip_msg.payload.clone(),
+                                    message_id: gossip_msg.message_id.clone(),
+                                    origin: MessageOrigin::Libp2p,
+                                    qos: QoS::AtMostOnce,
+                                };
+                                let _ = tx.send(mqtt_msg);
+                            }
                         }
-                    } else {
-                        // For non-MQTT messages, forward to MQTT with iroh/ prefix
-                        if let Some(ref tx) = libp2p_to_mqtt_tx {
-                            let mqtt_msg = Libp2pToMqttMessage {
-                                topic: format!("iroh/{}", topic_type),
-                                payload: gossip_msg.payload.clone(),
-                                message_id: gossip_msg.message_id.clone(),
-                                origin: MessageOrigin::Libp2p,
-                                qos: QoS::AtMostOnce,
-                            };
-                            let _ = tx.send(mqtt_msg);
-                        }
-                    }
 
-                    // Emit network event
-                    let _ = event_tx.send(NetworkEvent::Message {
-                        peer: from,
-                        data: gossip_msg.payload,
-                    });
-                } else {
-                    // Raw message
-                    let _ = event_tx.send(NetworkEvent::Message {
-                        peer: from,
-                        data: msg.content.to_vec(),
-                    });
+                        // Emit network event
+                        let _ = event_tx.send(NetworkEvent::Message {
+                            peer: from,
+                            data: gossip_msg.payload,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse gossip message as GossipMessage: {} ({} bytes from {})", e, msg.content.len(), from);
+                    }
                 }
             }
             GossipEvent::NeighborUp(node_id) => {
