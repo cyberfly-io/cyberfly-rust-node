@@ -7,6 +7,7 @@ edition = "2021"
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
 tokio-stream = "0.1"
+futures = "0.3"
 
 
 # Redis client
@@ -29,6 +30,7 @@ automerge = "0.6"
 iroh = { version = "0.93.2", features = ["discovery-local-network", "discovery-pkarr-dht"] }
 iroh-blobs = "0.95"
 iroh-gossip = "0.93"
+iroh-docs = "0.93"
 dashmap = "6.0"
 
 # MQTT
@@ -39,6 +41,7 @@ chrono = "0.4"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+bytes = "1.7"
 
 # Error handling
 anyhow = "1.0"
