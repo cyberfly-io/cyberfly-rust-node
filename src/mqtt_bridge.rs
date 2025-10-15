@@ -66,6 +66,7 @@ pub struct MqttBridge {
     libp2p_to_mqtt_rx: mpsc::UnboundedReceiver<Libp2pToMqttMessage>,
     seen_payloads: VecDeque<PayloadHash>,  // Time-based deduplication queue
     dedup_window_secs: u64,  // How long to remember payload hashes (in seconds)
+    connected: bool,  // Track connection state
 }
 
 impl MqttBridge {
@@ -147,6 +148,7 @@ impl MqttBridge {
             libp2p_to_mqtt_rx,
             seen_payloads: VecDeque::new(),
             dedup_window_secs: 300,  // 5 minutes deduplication window
+            connected: false,
         };
         
         Ok((bridge, libp2p_to_mqtt_tx, eventloop))
@@ -200,9 +202,6 @@ impl MqttBridge {
     
     /// Run the MQTT bridge event loop
     pub async fn run(mut self, mut eventloop: EventLoop) -> Result<()> {
-        // Subscribe to configured topics
-        self.subscribe_to_topics().await?;
-        
         tracing::info!("MQTT bridge started");
         
         loop {
@@ -238,6 +237,16 @@ impl MqttBridge {
                         }
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
                             tracing::info!("Connected to MQTT broker");
+                            self.connected = true;
+                            
+                            // Subscribe to topics only after connection is established
+                            if let Err(e) = self.subscribe_to_topics().await {
+                                tracing::error!("Failed to subscribe to MQTT topics after connection: {}", e);
+                            }
+                        }
+                        Ok(Event::Incoming(Packet::Disconnect)) => {
+                            tracing::info!("Disconnected from MQTT broker");
+                            self.connected = false;
                         }
                         Ok(Event::Incoming(Packet::SubAck(suback))) => {
                             tracing::info!("Subscribed to MQTT topics: {:?}", suback);
@@ -245,6 +254,8 @@ impl MqttBridge {
                         Ok(_) => {}
                         Err(e) => {
                             tracing::error!("MQTT connection error: {}", e);
+                            // Reset connection state on error
+                            self.connected = false;
                             tokio::time::sleep(Duration::from_secs(5)).await;
                         }
                     }
