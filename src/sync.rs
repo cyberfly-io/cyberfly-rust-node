@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use automerge::{AutoCommit, transaction::Transactable};
@@ -119,6 +119,8 @@ pub struct SyncStore {
     store: Option<FsStore>,
     /// Index mapping operation IDs to blob hashes
     operation_index: Arc<RwLock<HashMap<String, Hash>>>,
+    /// Set of operation IDs that have been applied to storage (in-memory dedupe)
+    applied_ops: Arc<RwLock<HashSet<String>>>,
 }
 
 impl SyncStore {
@@ -128,6 +130,7 @@ impl SyncStore {
             crdt_doc: Arc::new(RwLock::new(AutoCommit::new())),
             store: None,
             operation_index: Arc::new(RwLock::new(HashMap::new())),
+            applied_ops: Arc::new(RwLock::new(HashSet::new())),
         }
     }
     
@@ -138,7 +141,18 @@ impl SyncStore {
             crdt_doc: Arc::new(RwLock::new(AutoCommit::new())),
             store: Some(store),
             operation_index: Arc::new(RwLock::new(HashMap::new())),
+            applied_ops: Arc::new(RwLock::new(HashSet::new())),
         }
+    }
+
+    /// Check whether an operation has already been applied to storage
+    pub async fn is_applied(&self, op_id: &str) -> bool {
+        self.applied_ops.read().await.contains(op_id)
+    }
+
+    /// Mark an operation as applied to storage
+    pub async fn mark_applied(&self, op_id: &str) {
+        self.applied_ops.write().await.insert(op_id.to_string());
     }
     
     /// Persist an operation to Iroh blobs
@@ -262,11 +276,11 @@ impl SyncStore {
         // Check if we already have this operation
         if let Some((existing_ts, existing_op)) = ops.get(&crdt_key) {
             // LWW: Only update if new timestamp is newer
-            if op.timestamp <= *existing_ts {
-                // If same timestamp, use op_id as tiebreaker (lexicographic order)
-                if op.timestamp == *existing_ts && op.op_id <= existing_op.op_id {
-                    return Ok(false);
-                }
+            if op.timestamp < *existing_ts {
+                return Ok(false);
+            }
+            // If same timestamp, use op_id as tiebreaker (lexicographic order)
+            if op.timestamp == *existing_ts && op.op_id <= existing_op.op_id {
                 return Ok(false);
             }
         }
@@ -291,11 +305,11 @@ impl SyncStore {
         // Check if we already have this operation
         if let Some((existing_ts, existing_op)) = ops.get(&crdt_key) {
             // LWW: Only update if new timestamp is newer
-            if op.timestamp <= *existing_ts {
-                // If same timestamp, use op_id as tiebreaker (lexicographic order)
-                if op.timestamp == *existing_ts && op.op_id <= existing_op.op_id {
-                    return Ok(false);
-                }
+            if op.timestamp < *existing_ts {
+                return Ok(false);
+            }
+            // If same timestamp, use op_id as tiebreaker (lexicographic order)
+            if op.timestamp == *existing_ts && op.op_id <= existing_op.op_id {
                 return Ok(false);
             }
         }
@@ -494,6 +508,12 @@ impl SyncManager {
     
     /// Apply a single operation to Redis storage
     async fn apply_operation_to_storage(&self, op: &SignedOperation) -> Result<()> {
+        // Avoid re-applying the same operation multiple times
+        if self.sync_store.is_applied(&op.op_id).await {
+            tracing::debug!(op_id = %op.op_id, "Skipping already-applied operation");
+            return Ok(());
+        }
+
         let full_key = format!("{}:{}", op.db_name, op.key);
         
         match op.store_type.to_lowercase().as_str() {
@@ -557,7 +577,9 @@ impl SyncManager {
                 tracing::warn!("Unknown store type: {}", op.store_type);
             }
         }
-        
+        // Mark as applied so we don't re-apply on duplicate sync messages
+        self.sync_store.mark_applied(&op.op_id).await;
+
         Ok(())
     }
     
