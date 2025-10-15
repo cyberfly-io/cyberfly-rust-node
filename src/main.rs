@@ -203,7 +203,7 @@ async fn main() -> Result<()> {
     let mqtt_to_gossip_rx = mqtt_bridge.get_mqtt_to_gossip_receiver();
         
         // Connect MQTT bridge to Iroh network
-    network.connect_mqtt_bridge(mqtt_to_gossip_rx, gossip_to_mqtt_tx.clone(), Some(message_broadcast_tx.clone()));
+    network.connect_mqtt_bridge(mqtt_to_gossip_rx, gossip_to_mqtt_tx.clone());
         
         // Create message store for GraphQL queries and wire broadcast for subscriptions
         let mqtt_store = mqtt_bridge::MqttMessageStore::new(1000);
