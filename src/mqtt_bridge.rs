@@ -319,9 +319,13 @@ impl MqttBridge {
     
     /// Get the receiver for messages from MQTT to libp2p
     pub fn get_mqtt_to_gossip_receiver(&mut self) -> mpsc::UnboundedReceiver<MqttToGossipMessage> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let old_rx = std::mem::replace(&mut self.mqtt_to_gossip_rx, rx);
-        self.mqtt_to_gossip_tx = tx;
+        // Return the original receiver created in `new()` so the network can
+        // listen for messages produced by the bridge. We replace the field
+        // with a dummy receiver to take ownership of the original without
+        // changing the bridge's sender (which should continue to be used by
+        // the bridge to send messages).
+        let (_dummy_tx, dummy_rx) = mpsc::unbounded_channel();
+        let old_rx = std::mem::replace(&mut self.mqtt_to_gossip_rx, dummy_rx);
         old_rx
     }
 }
