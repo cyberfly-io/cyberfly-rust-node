@@ -104,10 +104,6 @@ async fn main() -> Result<()> {
         .secret_key(secret_key)
         .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::empty()))  // Enable relay mode
         .bind_addr_v4(bind_addr)  // Bind to fixed port 11204 (fallback to random if unavailable)
-        .alpns(vec![
-            iroh_blobs::ALPN.to_vec(),      // Blob protocol
-            iroh_gossip::ALPN.to_vec(),     // Gossip protocol
-        ])
         .bind()
         .await?;
     
