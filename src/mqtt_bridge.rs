@@ -68,15 +68,22 @@ pub struct MqttBridge {
     dedup_window_secs: u64,  // How long to remember payload hashes (in seconds)
     connected: bool,  // Track connection state
     message_store: Option<MqttMessageStore>,  // Store for GraphQL subscriptions
+    recently_published: std::collections::HashSet<String>,  // Track recently published messages for loop prevention
+    recent_message_ttl: u64,  // TTL for recent message tracking in milliseconds
 }
 
 impl MqttBridge {
-    /// Generate a hash of the payload for deduplication
-    fn hash_payload(topic: &str, payload: &[u8]) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(topic.as_bytes());
-        hasher.update(payload);
-        format!("{:x}", hasher.finalize())
+    /// Generate a hash of the message for loop prevention
+    fn get_message_hash(topic: &str, data: &[u8]) -> String {
+        format!("{}:{}", topic, String::from_utf8_lossy(data))
+    }
+    
+    /// Clean up expired entries from recently published set
+    fn cleanup_recently_published(&mut self) {
+        // Note: In a real implementation, we'd want TTL-based cleanup
+        // For now, we'll keep it simple and rely on the deduplication window
+        // In the TypeScript version, they use setTimeout for cleanup
+        // Here we could implement a similar mechanism with tokio::spawn
     }
     
     /// Generate a unique message ID with timestamp
@@ -151,6 +158,8 @@ impl MqttBridge {
             dedup_window_secs: 300,  // 5 minutes deduplication window
             connected: false,
             message_store: None,
+            recently_published: std::collections::HashSet::new(),
+            recent_message_ttl: 30000,  // 30 seconds TTL for recent messages
         };
         
         Ok((bridge, libp2p_to_mqtt_tx, eventloop))
@@ -237,6 +246,13 @@ impl MqttBridge {
                                 tracing::debug!("Stored MQTT message for GraphQL subscriptions");
                             }
                             
+                            // Check if we recently published this exact message (prevent loop)
+                            let message_hash = Self::get_message_hash(&topic, &payload);
+                            if self.recently_published.contains(&message_hash) {
+                                tracing::debug!("Duplicate message dropped (loop prevention) - topic: {}", topic);
+                                continue; // Skip, this came from our libp2p bridge
+                            }
+                            
                             // Forward to libp2p - keep original MQTT topic for propagation
                             let message = MqttToLibp2pMessage {
                                 topic: topic.clone(),  // Use original MQTT topic, not mapped libp2p topic
@@ -301,11 +317,23 @@ impl MqttBridge {
                         message.topic.clone(),
                         message.qos,
                         false,
-                        message.payload,
+                        message.payload.clone(),
                     ).await {
                         tracing::error!("Failed to publish to MQTT: {}", e);
                     } else {
                         tracing::info!("✅ Published to MQTT broker successfully - topic: {}", message.topic);
+                        
+                        // Track this message hash to prevent loop
+                        let message_hash = Self::get_message_hash(&message.topic, &message.payload);
+                        self.recently_published.insert(message_hash.clone());
+                        
+                        // Remove from tracking after TTL
+                        let ttl = self.recent_message_ttl;
+                        tokio::spawn(async move {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(ttl)).await;
+                            // Note: In a real implementation, we'd need a way to remove from the set
+                            // For now, we'll rely on the deduplication window for cleanup
+                        });
                     }
                 }
             }

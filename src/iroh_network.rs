@@ -30,7 +30,14 @@ pub enum NetworkEvent {
 /// Message format for gossip protocol
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GossipMessage {
+    /// Bridge metadata for loop prevention and tracking
+    #[serde(rename = "__origin")]
     origin: String,  // "mqtt" or "local"
+    #[serde(rename = "__broker")]
+    broker: String,  // Unique broker identifier (peer ID)
+    #[serde(rename = "__timestamp")]
+    timestamp: i64,  // Message timestamp
+    /// Actual message data
     message_id: String,
     topic: Option<String>,  // MQTT topic (for MQTT-originated messages)
     #[serde(with = "base64_bytes")]
@@ -379,7 +386,7 @@ impl IrohNetwork {
                         None
                     }
                 } => {
-                    if let Err(e) = Self::forward_mqtt_to_gossip(mqtt_msg, data_sender_clone.clone()).await {
+                    if let Err(e) = Self::forward_mqtt_to_gossip(mqtt_msg, data_sender_clone.clone(), node_id).await {
                         tracing::error!("Error forwarding MQTT message: {}", e);
                     }
                 }
@@ -471,11 +478,21 @@ impl IrohNetwork {
                             tracing::info!("📨 Received gossip message - origin: {}, topic: {:?}, from: {}", 
                                 gossip_msg.origin, gossip_msg.topic, from);
                             
+                            // Check if this is a bridge message with metadata
+                            let actual_data = gossip_msg.payload;
+                            let origin = gossip_msg.origin;
+                            let broker = gossip_msg.broker;
+                            
+                            // Skip if message originated from THIS node's MQTT broker
+                            // (prevents local MQTT clients from receiving duplicates)
+                            if origin == "mqtt" && broker == node_id.to_string() {
+                                tracing::debug!("Skipped message from own MQTT broker - loop prevention");
+                                return Ok(());
+                            }
+                            
                             // Forward MQTT messages to MQTT broker on other machines
                             // Messages originating from MQTT should be published to MQTT on remote peers
-                            // Mark as Libp2p origin so mqtt_bridge.rs will publish them
-                            // Deduplication in mqtt_bridge.rs prevents actual loops
-                            if gossip_msg.origin == "mqtt" {
+                            if origin == "mqtt" {
                                 if let Some(ref tx) = libp2p_to_mqtt_tx {
                                     // Use the original MQTT topic from the message
                                     let mqtt_topic = gossip_msg.topic.clone()
@@ -485,7 +502,7 @@ impl IrohNetwork {
                                     
                                     let mqtt_msg = Libp2pToMqttMessage {
                                         topic: mqtt_topic.clone(),
-                                        payload: gossip_msg.payload.clone(),
+                                        payload: actual_data,
                                         message_id: gossip_msg.message_id.clone(),
                                         origin: MessageOrigin::Libp2p,  // Mark as Libp2p so it gets published on remote peers
                                         qos: QoS::AtMostOnce,
@@ -504,7 +521,7 @@ impl IrohNetwork {
                                 if let Some(ref tx) = libp2p_to_mqtt_tx {
                                     let mqtt_msg = Libp2pToMqttMessage {
                                         topic: format!("iroh/{}", topic_type),
-                                        payload: gossip_msg.payload.clone(),
+                                        payload: actual_data,
                                         message_id: gossip_msg.message_id.clone(),
                                         origin: MessageOrigin::Libp2p,
                                         qos: QoS::AtMostOnce,
@@ -516,7 +533,7 @@ impl IrohNetwork {
                             // Emit network event
                             let _ = event_tx.send(NetworkEvent::Message {
                                 peer: from,
-                                data: gossip_msg.payload,
+                                data: actual_data,
                             });
                         }
                         Err(e) => {
@@ -548,12 +565,15 @@ impl IrohNetwork {
     async fn forward_mqtt_to_gossip(
         mqtt_msg: MqttToLibp2pMessage,
         data_sender: Arc<Mutex<GossipSender>>,
+        node_id: NodeId,
     ) -> Result<()> {
         tracing::info!("🔄 Forwarding MQTT message to gossip - topic: {}, payload_size: {}", 
             mqtt_msg.topic, mqtt_msg.payload.len());
 
         let gossip_msg = GossipMessage {
             origin: "mqtt".to_string(),
+            broker: node_id.to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
             message_id: mqtt_msg.message_id.clone(),
             topic: Some(mqtt_msg.topic.clone()),  // Include MQTT topic
             payload: mqtt_msg.payload,
@@ -577,6 +597,8 @@ impl IrohNetwork {
 
         let gossip_msg = GossipMessage {
             origin: "local".to_string(),
+            broker: self.node_id.to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
             message_id: uuid::Uuid::new_v4().to_string(),
             topic: None,  // No MQTT topic for local broadcasts
             payload: data,
