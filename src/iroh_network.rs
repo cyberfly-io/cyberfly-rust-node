@@ -12,12 +12,13 @@ use iroh_gossip::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock, Mutex};
+use tokio::sync::{mpsc, RwLock, Mutex, broadcast};
 use serde::{Serialize, Deserialize};
 use tokio_stream::StreamExt;
 use rumqttc::QoS;
 
 use crate::mqtt_bridge::{GossipToMqttMessage, MqttToGossipMessage, MessageOrigin};
+use crate::graphql::MessageEvent as GraphqlMessageEvent;
 
 /// Network event types
 #[derive(Debug, Clone)]
@@ -85,6 +86,8 @@ pub struct IrohNetwork {
     event_rx: Arc<RwLock<mpsc::UnboundedReceiver<NetworkEvent>>>,
     mqtt_to_libp2p_rx: Option<mpsc::UnboundedReceiver<MqttToGossipMessage>>,
     libp2p_to_mqtt_tx: Option<mpsc::UnboundedSender<GossipToMqttMessage>>,
+    /// Optional broadcast channel sender for GraphQL subscriptions.
+    message_broadcast: Option<broadcast::Sender<GraphqlMessageEvent>>,
     // Gossip topics
     data_topic: TopicId,
     discovery_topic: TopicId,
@@ -188,6 +191,7 @@ impl IrohNetwork {
             event_rx: Arc::new(RwLock::new(event_rx)),
             mqtt_to_libp2p_rx: None,
             libp2p_to_mqtt_tx: None,
+            message_broadcast: None,
             data_topic,
             discovery_topic,
             sync_topic,
@@ -229,9 +233,11 @@ impl IrohNetwork {
         &mut self,
         mqtt_to_gossip_rx: mpsc::UnboundedReceiver<MqttToGossipMessage>,
         gossip_to_mqtt_tx: mpsc::UnboundedSender<GossipToMqttMessage>,
+        message_broadcast: Option<broadcast::Sender<GraphqlMessageEvent>>,
     ) {
         self.mqtt_to_libp2p_rx = Some(mqtt_to_gossip_rx);
         self.libp2p_to_mqtt_tx = Some(gossip_to_mqtt_tx);
+        self.message_broadcast = message_broadcast;
         tracing::info!("MQTT bridge connected to Iroh network");
     }
 
@@ -322,7 +328,8 @@ impl IrohNetwork {
                                 node_id, 
                                 &event_tx,
                                 &libp2p_to_mqtt_tx,
-                                &discovered_peers
+                                &discovered_peers,
+                                &self.message_broadcast,
                             ).await {
                                 tracing::error!("Error handling data gossip event: {}", e);
                             }
@@ -347,7 +354,8 @@ impl IrohNetwork {
                                 node_id,
                                 &event_tx,
                                 &libp2p_to_mqtt_tx,
-                                &discovered_peers
+                                &discovered_peers,
+                                &self.message_broadcast,
                             ).await {
                                 tracing::error!("Error handling discovery gossip event: {}", e);
                             }
@@ -453,8 +461,9 @@ impl IrohNetwork {
         topic_type: &str,
         node_id: NodeId,
         event_tx: &mpsc::UnboundedSender<NetworkEvent>,
-    libp2p_to_mqtt_tx: &Option<mpsc::UnboundedSender<GossipToMqttMessage>>,
+        libp2p_to_mqtt_tx: &Option<mpsc::UnboundedSender<GossipToMqttMessage>>,
         discovered_peers: &Arc<dashmap::DashMap<NodeId, chrono::DateTime<chrono::Utc>>>,
+        message_broadcast: &Option<broadcast::Sender<GraphqlMessageEvent>>,
     ) -> Result<()> {
         match event {
             GossipEvent::Received(msg) => {
@@ -539,8 +548,24 @@ impl IrohNetwork {
                             // Emit network event
                             let _ = event_tx.send(NetworkEvent::Message {
                                 peer: from,
-                                data: actual_data,
+                                data: actual_data.clone(),
                             });
+
+                            // Also broadcast to GraphQL subscribers if available.
+                            if let Some(ref broadcaster) = message_broadcast {
+                                // Build MessageEvent compatible with GraphQL subscription
+                                let topic_for_event = gossip_msg.topic.clone().unwrap_or_else(|| format!("iroh/{}", topic_type));
+                                let graphql_event = GraphqlMessageEvent {
+                                    topic: topic_for_event,
+                                    payload: actual_data.clone(),
+                                    timestamp: gossip_msg.timestamp,
+                                };
+
+                                match broadcaster.send(graphql_event) {
+                                    Ok(_) => tracing::debug!("Broadcasted gossip message to GraphQL subscribers"),
+                                    Err(e) => tracing::debug!("No GraphQL subscribers or broadcast error: {}", e),
+                                }
+                            }
                         }
                         Err(e) => {
                             // If DEBUG_GOSSIP_RAW is set, include the base64 payload in the warning
