@@ -199,11 +199,11 @@ async fn main() -> Result<()> {
         
         tracing::info!("MQTT client ID: {}", mqtt_client_id);
         
-        let (mut mqtt_bridge, libp2p_to_mqtt_tx, mqtt_eventloop) = mqtt_bridge::MqttBridge::new(bridge_config)?;
-        let mqtt_to_libp2p_rx = mqtt_bridge.get_mqtt_to_libp2p_receiver();
+    let (mut mqtt_bridge, gossip_to_mqtt_tx, mqtt_eventloop) = mqtt_bridge::MqttBridge::new(bridge_config)?;
+    let mqtt_to_gossip_rx = mqtt_bridge.get_mqtt_to_gossip_receiver();
         
         // Connect MQTT bridge to Iroh network
-        network.connect_mqtt_bridge(mqtt_to_libp2p_rx, libp2p_to_mqtt_tx.clone());
+    network.connect_mqtt_bridge(mqtt_to_gossip_rx, gossip_to_mqtt_tx.clone());
         
         // Create message store for GraphQL queries and wire broadcast for subscriptions
         let mqtt_store = mqtt_bridge::MqttMessageStore::new(1000);
@@ -251,8 +251,8 @@ async fn main() -> Result<()> {
             }
         });
         
-        tracing::info!("MQTT bridge initialized and connected to Iroh network");
-        (Some(libp2p_to_mqtt_tx), Some(mqtt_store))
+    tracing::info!("MQTT bridge initialized and connected to Iroh network");
+    (Some(gossip_to_mqtt_tx), Some(mqtt_store))
     } else {
         tracing::info!("MQTT bridge disabled");
         (None, None)

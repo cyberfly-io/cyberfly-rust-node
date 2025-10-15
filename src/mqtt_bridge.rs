@@ -9,7 +9,7 @@ use sha2::{Sha256, Digest};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageOrigin {
     Mqtt,      // Message originated from MQTT broker
-    Libp2p,    // Message originated from libp2p network
+    Gossip,    // Message originated from gossip network
 }
 
 /// Payload hash with timestamp for time-based deduplication
@@ -19,17 +19,17 @@ struct PayloadHash {
     timestamp: u64,  // Unix timestamp in seconds
 }
 
-/// Message from MQTT to be forwarded to libp2p
+/// Message from MQTT to be forwarded to gossip
 #[derive(Debug, Clone)]
-pub struct MqttToLibp2pMessage {
+pub struct MqttToGossipMessage {
     pub topic: String,
     pub payload: Vec<u8>,
     pub message_id: String,  // Unique ID to prevent loops
 }
 
-/// Message from libp2p to be forwarded to MQTT
+/// Message from gossip to be forwarded to MQTT
 #[derive(Debug, Clone)]
-pub struct Libp2pToMqttMessage {
+pub struct GossipToMqttMessage {
     pub topic: String,
     pub payload: Vec<u8>,
     pub qos: QoS,
@@ -61,14 +61,15 @@ impl Default for MqttBridgeConfig {
 pub struct MqttBridge {
     client: AsyncClient,
     config: MqttBridgeConfig,
-    mqtt_to_libp2p_tx: mpsc::UnboundedSender<MqttToLibp2pMessage>,
-    mqtt_to_libp2p_rx: mpsc::UnboundedReceiver<MqttToLibp2pMessage>,
-    libp2p_to_mqtt_rx: mpsc::UnboundedReceiver<Libp2pToMqttMessage>,
+    mqtt_to_gossip_tx: mpsc::UnboundedSender<MqttToGossipMessage>,
+    mqtt_to_gossip_rx: mpsc::UnboundedReceiver<MqttToGossipMessage>,
+    gossip_to_mqtt_rx: mpsc::UnboundedReceiver<GossipToMqttMessage>,
     seen_payloads: VecDeque<PayloadHash>,  // Time-based deduplication queue
     dedup_window_secs: u64,  // How long to remember payload hashes (in seconds)
     connected: bool,  // Track connection state
     message_store: Option<MqttMessageStore>,  // Store for GraphQL subscriptions
     recently_published: std::collections::HashSet<String>,  // Track recently published messages for loop prevention
+    recently_published_queue: VecDeque<(String, u128)>, // (hash, expiry_epoch_millis)
     recent_message_ttl: u64,  // TTL for recent message tracking in milliseconds
 }
 
@@ -135,7 +136,7 @@ impl MqttBridge {
     }
     
     /// Create a new MQTT bridge
-    pub fn new(config: MqttBridgeConfig) -> Result<(Self, mpsc::UnboundedSender<Libp2pToMqttMessage>, EventLoop)> {
+    pub fn new(config: MqttBridgeConfig) -> Result<(Self, mpsc::UnboundedSender<GossipToMqttMessage>, EventLoop)> {
         let mut mqttoptions = MqttOptions::new(
             &config.client_id,
             &config.broker_host,
@@ -145,24 +146,40 @@ impl MqttBridge {
         
         let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
         
-        let (mqtt_to_libp2p_tx, mqtt_to_libp2p_rx) = mpsc::unbounded_channel();
-        let (libp2p_to_mqtt_tx, libp2p_to_mqtt_rx) = mpsc::unbounded_channel();
+    let (mqtt_to_gossip_tx, mqtt_to_gossip_rx) = mpsc::unbounded_channel();
+    let (gossip_to_mqtt_tx, gossip_to_mqtt_rx) = mpsc::unbounded_channel();
         
         let bridge = Self {
             client,
             config,
-            mqtt_to_libp2p_tx,
-            mqtt_to_libp2p_rx,
-            libp2p_to_mqtt_rx,
+            mqtt_to_gossip_tx,
+            mqtt_to_gossip_rx,
+            gossip_to_mqtt_rx,
             seen_payloads: VecDeque::new(),
             dedup_window_secs: 300,  // 5 minutes deduplication window
             connected: false,
             message_store: None,
             recently_published: std::collections::HashSet::new(),
+            recently_published_queue: VecDeque::new(),
             recent_message_ttl: 30000,  // 30 seconds TTL for recent messages
         };
         
-        Ok((bridge, libp2p_to_mqtt_tx, eventloop))
+        Ok((bridge, gossip_to_mqtt_tx, eventloop))
+    }
+
+    /// Purge expired entries from recently_published set using the queue
+    fn purge_expired_recently_published(&mut self) {
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+        while let Some((hash, expiry)) = self.recently_published_queue.front() {
+            if *expiry <= now_ms {
+                // expired -> remove from both queue and set
+                if let Some((h, _)) = self.recently_published_queue.pop_front() {
+                    self.recently_published.remove(&h);
+                }
+            } else {
+                break;
+            }
+        }
     }
     
     /// Set the message store for GraphQL subscriptions
@@ -177,44 +194,7 @@ impl MqttBridge {
         Ok(())
     }
     
-    /// Check if a topic matches a wildcard pattern
-    /// Supports both + (single-level) and # (multi-level) wildcards
-    fn matches_wildcard(pattern: &str, topic: &str) -> bool {
-        let pattern_parts: Vec<&str> = pattern.split('/').collect();
-        let topic_parts: Vec<&str> = topic.split('/').collect();
-        
-        let mut pattern_idx = 0;
-        let mut topic_idx = 0;
-        
-        while pattern_idx < pattern_parts.len() && topic_idx < topic_parts.len() {
-            let pattern_part = pattern_parts[pattern_idx];
-            let topic_part = topic_parts[topic_idx];
-            
-            if pattern_part == "#" {
-                // Multi-level wildcard matches everything remaining
-                return true;
-            } else if pattern_part == "+" {
-                // Single-level wildcard matches one level
-                pattern_idx += 1;
-                topic_idx += 1;
-            } else if pattern_part == topic_part {
-                // Exact match
-                pattern_idx += 1;
-                topic_idx += 1;
-            } else {
-                // No match
-                return false;
-            }
-        }
-        
-        // Check if we've consumed both pattern and topic
-        // Handle trailing # in pattern
-        if pattern_idx < pattern_parts.len() && pattern_parts[pattern_idx] == "#" {
-            return true;
-        }
-        
-        pattern_idx == pattern_parts.len() && topic_idx == topic_parts.len()
-    }
+
     
     /// Run the MQTT bridge event loop
     pub async fn run(mut self, mut eventloop: EventLoop) -> Result<()> {
@@ -254,16 +234,16 @@ impl MqttBridge {
                             }
                             
                             // Forward to libp2p - keep original MQTT topic for propagation
-                            let message = MqttToLibp2pMessage {
+                            let message = MqttToGossipMessage {
                                 topic: topic.clone(),  // Use original MQTT topic, not mapped libp2p topic
                                 payload,
                                 message_id,
                             };
                             
-                            if let Err(e) = self.mqtt_to_libp2p_tx.send(message) {
-                                tracing::error!("Failed to forward MQTT message to libp2p: {}", e);
+                            if let Err(e) = self.mqtt_to_gossip_tx.send(message) {
+                                tracing::error!("Failed to forward MQTT message to gossip: {}", e);
                             } else {
-                                tracing::info!("✅ Forwarded MQTT message to libp2p network");
+                                tracing::info!("✅ Forwarded MQTT message to gossip network");
                             }
                         }
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
@@ -293,8 +273,8 @@ impl MqttBridge {
                 }
                 
                 // Handle messages from libp2p to be published to MQTT
-                Some(message) = self.libp2p_to_mqtt_rx.recv() => {
-                    tracing::info!("📥 Received message from libp2p - topic: {}, origin: {:?}, payload_size: {}", 
+                Some(message) = self.gossip_to_mqtt_rx.recv() => {
+                    tracing::info!("📥 Received message from gossip - topic: {}, origin: {:?}, payload_size: {}", 
                         message.topic, message.origin, message.payload.len());
                     
                     // Only forward messages that originated from libp2p (not MQTT)
@@ -323,17 +303,14 @@ impl MqttBridge {
                     } else {
                         tracing::info!("✅ Published to MQTT broker successfully - topic: {}", message.topic);
                         
-                        // Track this message hash to prevent loop
+                        // Track this message hash to prevent loop with TTL cleanup
                         let message_hash = Self::get_message_hash(&message.topic, &message.payload);
+                        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+                        let expiry = now_ms + (self.recent_message_ttl as u128);
                         self.recently_published.insert(message_hash.clone());
-                        
-                        // Remove from tracking after TTL
-                        let ttl = self.recent_message_ttl;
-                        tokio::spawn(async move {
-                            tokio::time::sleep(tokio::time::Duration::from_millis(ttl)).await;
-                            // Note: In a real implementation, we'd need a way to remove from the set
-                            // For now, we'll rely on the deduplication window for cleanup
-                        });
+                        self.recently_published_queue.push_back((message_hash.clone(), expiry));
+                        // Purge expired entries synchronously here (fast operation)
+                        self.purge_expired_recently_published();
                     }
                 }
             }
@@ -341,10 +318,10 @@ impl MqttBridge {
     }
     
     /// Get the receiver for messages from MQTT to libp2p
-    pub fn get_mqtt_to_libp2p_receiver(&mut self) -> mpsc::UnboundedReceiver<MqttToLibp2pMessage> {
+    pub fn get_mqtt_to_gossip_receiver(&mut self) -> mpsc::UnboundedReceiver<MqttToGossipMessage> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let old_rx = std::mem::replace(&mut self.mqtt_to_libp2p_rx, rx);
-        self.mqtt_to_libp2p_tx = tx;
+        let old_rx = std::mem::replace(&mut self.mqtt_to_gossip_rx, rx);
+        self.mqtt_to_gossip_tx = tx;
         old_rx
     }
 }

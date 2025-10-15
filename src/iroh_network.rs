@@ -17,7 +17,7 @@ use serde::{Serialize, Deserialize};
 use tokio_stream::StreamExt;
 use rumqttc::QoS;
 
-use crate::mqtt_bridge::{Libp2pToMqttMessage, MqttToLibp2pMessage, MessageOrigin};
+use crate::mqtt_bridge::{GossipToMqttMessage, MqttToGossipMessage, MessageOrigin};
 
 /// Network event types
 #[derive(Debug, Clone)]
@@ -83,8 +83,8 @@ pub struct IrohNetwork {
     node_id: NodeId,
     event_tx: mpsc::UnboundedSender<NetworkEvent>,
     event_rx: Arc<RwLock<mpsc::UnboundedReceiver<NetworkEvent>>>,
-    mqtt_to_libp2p_rx: Option<mpsc::UnboundedReceiver<MqttToLibp2pMessage>>,
-    libp2p_to_mqtt_tx: Option<mpsc::UnboundedSender<Libp2pToMqttMessage>>,
+    mqtt_to_libp2p_rx: Option<mpsc::UnboundedReceiver<MqttToGossipMessage>>,
+    libp2p_to_mqtt_tx: Option<mpsc::UnboundedSender<GossipToMqttMessage>>,
     // Gossip topics
     data_topic: TopicId,
     discovery_topic: TopicId,
@@ -227,11 +227,11 @@ impl IrohNetwork {
     /// Connect MQTT bridge to network
     pub fn connect_mqtt_bridge(
         &mut self,
-        mqtt_to_libp2p_rx: mpsc::UnboundedReceiver<MqttToLibp2pMessage>,
-        libp2p_to_mqtt_tx: mpsc::UnboundedSender<Libp2pToMqttMessage>,
+        mqtt_to_gossip_rx: mpsc::UnboundedReceiver<MqttToGossipMessage>,
+        gossip_to_mqtt_tx: mpsc::UnboundedSender<GossipToMqttMessage>,
     ) {
-        self.mqtt_to_libp2p_rx = Some(mqtt_to_libp2p_rx);
-        self.libp2p_to_mqtt_tx = Some(libp2p_to_mqtt_tx);
+        self.mqtt_to_libp2p_rx = Some(mqtt_to_gossip_rx);
+        self.libp2p_to_mqtt_tx = Some(gossip_to_mqtt_tx);
         tracing::info!("MQTT bridge connected to Iroh network");
     }
 
@@ -453,7 +453,7 @@ impl IrohNetwork {
         topic_type: &str,
         node_id: NodeId,
         event_tx: &mpsc::UnboundedSender<NetworkEvent>,
-        libp2p_to_mqtt_tx: &Option<mpsc::UnboundedSender<Libp2pToMqttMessage>>,
+    libp2p_to_mqtt_tx: &Option<mpsc::UnboundedSender<GossipToMqttMessage>>,
         discovered_peers: &Arc<dashmap::DashMap<NodeId, chrono::DateTime<chrono::Utc>>>,
     ) -> Result<()> {
         match event {
@@ -500,11 +500,11 @@ impl IrohNetwork {
                                     
                                     tracing::info!("🔀 Forwarding gossip MQTT message to MQTT broker - topic: {}", mqtt_topic);
                                     
-                                    let mqtt_msg = Libp2pToMqttMessage {
+                                    let mqtt_msg = GossipToMqttMessage {
                                         topic: mqtt_topic.clone(),
                                         payload: actual_data.clone(),
                                         message_id: gossip_msg.message_id.clone(),
-                                        origin: MessageOrigin::Libp2p,  // Mark as Libp2p so it gets published on remote peers
+                                        origin: MessageOrigin::Gossip,  // Mark as Gossip so it gets published on remote peers
                                         qos: QoS::AtMostOnce,
                                     };
                                     
@@ -519,11 +519,11 @@ impl IrohNetwork {
                             } else {
                                 // For non-MQTT messages, forward to MQTT with iroh/ prefix
                                 if let Some(ref tx) = libp2p_to_mqtt_tx {
-                                    let mqtt_msg = Libp2pToMqttMessage {
+                                    let mqtt_msg = GossipToMqttMessage {
                                         topic: format!("iroh/{}", topic_type),
                                         payload: actual_data.clone(),
                                         message_id: gossip_msg.message_id.clone(),
-                                        origin: MessageOrigin::Libp2p,
+                                        origin: MessageOrigin::Gossip,
                                         qos: QoS::AtMostOnce,
                                     };
                                     let _ = tx.send(mqtt_msg);
@@ -563,7 +563,7 @@ impl IrohNetwork {
 
     /// Forward MQTT message to gossip network
     async fn forward_mqtt_to_gossip(
-        mqtt_msg: MqttToLibp2pMessage,
+        mqtt_msg: MqttToGossipMessage,
         data_sender: Arc<Mutex<GossipSender>>,
         node_id: NodeId,
     ) -> Result<()> {

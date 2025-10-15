@@ -880,12 +880,12 @@ impl MutationRoot {
 
     /// Publish message to IoT devices via MQTT
     async fn publish_iot_message(&self, ctx: &Context<'_>, topic: String, payload: String, qos: Option<i32>) -> Result<IotPublishResult, DbError> {
-        use crate::mqtt_bridge::{Libp2pToMqttMessage, MessageOrigin};
+    use crate::mqtt_bridge::{GossipToMqttMessage, MessageOrigin};
         use tokio::sync::mpsc;
         use rumqttc::QoS;
         use sha2::{Sha256, Digest};
         
-        let mqtt_tx = ctx.data::<mpsc::UnboundedSender<Libp2pToMqttMessage>>()
+        let mqtt_tx = ctx.data::<mpsc::UnboundedSender<GossipToMqttMessage>>()
             .map_err(|_| DbError::InternalError("MQTT bridge not available".to_string()))?;
         
         let qos_level = match qos.unwrap_or(1) {
@@ -908,12 +908,12 @@ impl MutationRoot {
         hasher.update(timestamp.to_le_bytes());
         let message_id = format!("{:x}", hasher.finalize());
         
-        let message = Libp2pToMqttMessage {
+        let message = GossipToMqttMessage {
             topic: topic.clone(),
             payload: payload_bytes.clone(),
             qos: qos_level,
             message_id,
-            origin: MessageOrigin::Libp2p,  // Originated from GraphQL API (libp2p side)
+            origin: MessageOrigin::Gossip,  // Originated from GraphQL API (gossip side)
         };
         
         mqtt_tx.send(message).map_err(|e| DbError::InternalError(format!("Failed to send to MQTT: {}", e)))?;
@@ -1083,7 +1083,7 @@ pub async fn create_server(
     sync_manager: Option<SyncManager>,
     endpoint: Option<iroh::Endpoint>,  // Pass Endpoint instead of wrapped IrohNetwork
     discovered_peers: Option<Arc<dashmap::DashMap<iroh::NodeId, chrono::DateTime<chrono::Utc>>>>,  // Discovered peers map
-    mqtt_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::Libp2pToMqttMessage>>,
+    mqtt_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::GossipToMqttMessage>>,
     mqtt_store: Option<crate::mqtt_bridge::MqttMessageStore>,
     message_broadcast: Option<broadcast::Sender<MessageEvent>>,
 ) -> Result<Router> {
