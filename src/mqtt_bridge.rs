@@ -220,24 +220,18 @@ impl MqttBridge {
                             
                             tracing::info!("📨 Received MQTT message - topic: {}, payload_size: {}", topic, payload.len());
                             
-                            // Store message for GraphQL subscriptions (include message_id)
-                            if let Some(ref store) = self.message_store {
-                                store.add_message(topic.clone(), payload.clone(), Some(message_id.clone())).await;
-                                tracing::debug!("Stored MQTT message for GraphQL subscriptions");
-                            }
-                            
                             // Check if we recently published this exact message (prevent loop)
                             let message_hash = Self::get_message_hash(&topic, &payload);
                             if self.recently_published.contains(&message_hash) {
                                 tracing::debug!("Duplicate message dropped (loop prevention) - topic: {}", topic);
                                 continue; // Skip, this came from our libp2p bridge
                             }
-                            
+
                             // Forward to libp2p - keep original MQTT topic for propagation
                             let message = MqttToGossipMessage {
                                 topic: topic.clone(),  // Use original MQTT topic, not mapped libp2p topic
-                                payload,
-                                message_id,
+                                payload: payload.clone(),
+                                message_id: message_id.clone(),
                             };
 
                             // Log and forward to gossip network. This log includes the
@@ -249,6 +243,12 @@ impl MqttBridge {
                                 tracing::error!("Failed to forward MQTT message to gossip: {}", e);
                             } else {
                                 tracing::info!("✅ Forwarded MQTT message to gossip network");
+                            }
+
+                            // Store message for GraphQL subscriptions (after forwarding and dedupe check)
+                            if let Some(ref store) = self.message_store {
+                                store.add_message(topic.clone(), payload.clone(), Some(message_id.clone())).await;
+                                tracing::debug!("Stored MQTT message for GraphQL subscriptions");
                             }
                         }
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
