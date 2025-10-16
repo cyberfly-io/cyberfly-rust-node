@@ -368,6 +368,9 @@ async fn main() -> Result<()> {
     // Get cloneable reference to discovered peers map before moving network
     let discovered_peers_map = network.discovered_peers_map();
 
+    // Create outbound sync channel so other components (GraphQL) can send SyncMessage to network
+    let (sync_out_tx, sync_out_rx) = tokio::sync::mpsc::unbounded_channel::<crate::sync::SyncMessage>();
+
     let graphql_server = graphql::create_server(
         storage.clone(),
         ipfs,
@@ -378,11 +381,15 @@ async fn main() -> Result<()> {
         mqtt_to_gossip_tx,
         mqtt_store,
         Some(message_broadcast_tx.clone()),
+        Some(sync_out_tx.clone()),
     )
     .await?;
     tracing::info!("GraphQL server initialized with WebSocket subscription support");
 
     // Start network event loop
+    // Attach sync outbound receiver so GraphQL can submit SyncMessage to be broadcast
+    network.set_sync_outbound_rx(sync_out_rx);
+
     tokio::spawn(async move {
         if let Err(e) = network.run().await {
             tracing::error!("Network error: {}", e);

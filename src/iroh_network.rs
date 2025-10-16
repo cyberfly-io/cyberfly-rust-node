@@ -84,6 +84,8 @@ pub struct IrohNetwork {
     event_rx: Arc<RwLock<mpsc::UnboundedReceiver<NetworkEvent>>>,
     mqtt_to_libp2p_rx: Option<mpsc::UnboundedReceiver<MqttToGossipMessage>>,
     libp2p_to_mqtt_tx: Option<mpsc::UnboundedSender<GossipToMqttMessage>>,
+    /// Optional receiver for outbound sync messages from other components (e.g. GraphQL)
+    sync_outbound_rx: Option<mpsc::UnboundedReceiver<crate::sync::SyncMessage>>,
     // Gossip topics
     data_topic: TopicId,
     discovery_topic: TopicId,
@@ -141,6 +143,13 @@ impl IrohNetwork {
         node_ids
     }
 
+    /// Attach an outbound sync receiver so other components (e.g. GraphQL) can send
+    /// SyncMessage values to be broadcast by the network. This avoids exposing the
+    /// internal field directly.
+    pub fn set_sync_outbound_rx(&mut self, rx: mpsc::UnboundedReceiver<crate::sync::SyncMessage>) {
+        self.sync_outbound_rx = Some(rx);
+    }
+
     /// Create Iroh network from existing components (recommended)
     /// 
     /// This constructor allows sharing a single Iroh node across multiple
@@ -187,6 +196,7 @@ impl IrohNetwork {
             event_rx: Arc::new(RwLock::new(event_rx)),
             mqtt_to_libp2p_rx: None,
             libp2p_to_mqtt_tx: None,
+            sync_outbound_rx: None,
             data_topic,
             discovery_topic,
             sync_topic,
@@ -387,6 +397,32 @@ impl IrohNetwork {
                 } => {
                     if let Err(e) = Self::forward_mqtt_to_gossip(mqtt_msg, data_sender_clone.clone(), node_id).await {
                         tracing::error!("Error forwarding MQTT message: {}", e);
+                    }
+                }
+                // Handle outbound sync messages submitted by other components (GraphQL, etc.)
+                Some(sync_msg) = async {
+                    if let Some(ref mut rx) = self.sync_outbound_rx {
+                        rx.recv().await
+                    } else {
+                        None
+                    }
+                } => {
+                    // Broadcast the sync message to peers
+                    tracing::debug!("IrohNetwork: received outbound sync message to broadcast");
+                    // Log operation id if this is an operation message for easier tracing
+                    match &sync_msg {
+                        crate::sync::SyncMessage::Operation { operation } => {
+                            tracing::debug!("IrohNetwork: broadcasting operation {} to sync topic", operation.op_id);
+                        }
+                        _ => {
+                            tracing::debug!("IrohNetwork: broadcasting non-operation sync message");
+                        }
+                    }
+
+                    if let Err(e) = self.broadcast_sync(sync_msg).await {
+                        tracing::error!("IrohNetwork: Failed to broadcast outbound sync message: {}", e);
+                    } else {
+                        tracing::debug!("IrohNetwork: outbound sync message broadcast completed");
                     }
                 }
             }

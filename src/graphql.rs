@@ -1567,6 +1567,15 @@ impl MutationRoot {
             }
         }
 
+        // If an outbound sync sender is available in the GraphQL context, broadcast the operation
+        if let Ok(sync_out_tx) = ctx.data::<tokio::sync::mpsc::UnboundedSender<crate::sync::SyncMessage>>() {
+            tracing::debug!("GraphQL: sending outbound SyncMessage::Operation: {}", signed_operation.op_id);
+            let res = sync_out_tx.send(crate::sync::SyncMessage::Operation { operation: signed_operation.clone() });
+            if res.is_err() {
+                tracing::warn!("GraphQL: failed to send outbound sync message (receiver gone)");
+            }
+        }
+
         // Broadcast message event to subscribers if broadcast channel is available
         if let Ok(broadcast_tx) = ctx.data::<broadcast::Sender<MessageEvent>>() {
             let event = MessageEvent {
@@ -1866,6 +1875,7 @@ pub async fn create_server(
     >,
     mqtt_store: Option<crate::mqtt_bridge::MqttMessageStore>,
     message_broadcast: Option<broadcast::Sender<MessageEvent>>,
+    sync_outbound: Option<tokio::sync::mpsc::UnboundedSender<crate::sync::SyncMessage>>,
 ) -> Result<Router> {
     // Use provided broadcast channel or create a new one
     let broadcast_tx = message_broadcast.unwrap_or_else(|| {
@@ -1904,6 +1914,11 @@ pub async fn create_server(
     }
     if let Some(store) = mqtt_store {
         schema_builder = schema_builder.data(store);
+    }
+
+    // Add outbound sync sender for broadcasting operations
+    if let Some(tx) = sync_outbound {
+        schema_builder = schema_builder.data(tx);
     }
 
     let schema = schema_builder.finish();
