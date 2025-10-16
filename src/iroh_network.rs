@@ -438,10 +438,11 @@ impl IrohNetwork {
         event_tx: &mpsc::UnboundedSender<NetworkEvent>,
         discovered_peers: &Arc<dashmap::DashMap<NodeId, chrono::DateTime<chrono::Utc>>>,
     ) -> Result<()> {
-        match event {
-            GossipEvent::Received(msg) => {
-                let from = msg.delivered_from;
-                tracing::debug!("Received sync message from {}", from);
+                match event {
+                    GossipEvent::Received(msg) => {
+                        let from = msg.delivered_from;
+                        // Use info level so remote nodes will show receipt in default log level
+                        tracing::info!("📨 Received sync message from {} ({} bytes)", from, msg.content.len());
 
                 // Ignore our own messages
                 if from == node_id {
@@ -458,7 +459,7 @@ impl IrohNetwork {
                     data: msg.content.to_vec(),
                 });
             }
-            GossipEvent::NeighborUp(peer_node_id) => {
+                GossipEvent::NeighborUp(peer_node_id) => {
                 tracing::info!("Sync neighbor up: {}", peer_node_id);
                 
                 // Track this peer immediately when they connect
@@ -466,7 +467,7 @@ impl IrohNetwork {
                 
                 let _ = event_tx.send(NetworkEvent::PeerDiscovered { peer: peer_node_id });
             }
-            GossipEvent::NeighborDown(peer_node_id) => {
+                GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::info!("Sync neighbor down: {}", peer_node_id);
                 
                 // Remove peer when they disconnect
@@ -685,11 +686,12 @@ impl IrohNetwork {
         let Some(ref sender) = self.sync_sender else {
             anyhow::bail!("Network not started - call run() first");
         };
-        
         let payload = serde_json::to_vec(&sync_msg)?;
+        let len = payload.len();
         sender.lock().await.broadcast(payload.into()).await?;
-        
-        tracing::debug!("Broadcast sync message");
+
+        // Use info to surface broadcasts in default logs; include payload length
+        tracing::info!("Broadcast sync message ({} bytes)", len);
         Ok(())
     }
     

@@ -624,12 +624,22 @@ impl SyncManager {
             }
 
             SyncMessage::Operation { operation } => {
-                tracing::debug!("Received operation {} from {}", operation.op_id, from_peer);
+                tracing::info!("Received operation {} from {}", operation.op_id, from_peer);
 
                 // Add operation to sync store (will verify signature)
-                if self.sync_store.add_operation(operation.clone()).await? {
-                    // Apply to storage
-                    self.apply_operation_to_storage(&operation).await?;
+                match self.sync_store.add_operation(operation.clone()).await {
+                    Ok(true) => {
+                        tracing::info!(op_id = %operation.op_id, "Operation accepted into SyncStore, applying to storage");
+                        if let Err(e) = self.apply_operation_to_storage(&operation).await {
+                            tracing::error!(op_id = %operation.op_id, "Failed to apply operation to storage: {}", e);
+                        }
+                    }
+                    Ok(false) => {
+                        tracing::info!(op_id = %operation.op_id, "Operation rejected by SyncStore (duplicate or older)");
+                    }
+                    Err(e) => {
+                        tracing::warn!(op_id = %operation.op_id, "Failed to add operation to SyncStore: {}", e);
+                    }
                 }
 
                 Ok(None)

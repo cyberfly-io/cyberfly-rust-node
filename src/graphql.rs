@@ -1569,7 +1569,7 @@ impl MutationRoot {
 
         // If an outbound sync sender is available in the GraphQL context, broadcast the operation
         if let Ok(sync_out_tx) = ctx.data::<tokio::sync::mpsc::UnboundedSender<crate::sync::SyncMessage>>() {
-            tracing::debug!("GraphQL: sending outbound SyncMessage::Operation: {}", signed_operation.op_id);
+            tracing::info!("GraphQL: sending outbound SyncMessage::Operation: {}", signed_operation.op_id);
             let res = sync_out_tx.send(crate::sync::SyncMessage::Operation { operation: signed_operation.clone() });
             if res.is_err() {
                 tracing::warn!("GraphQL: failed to send outbound sync message (receiver gone)");
