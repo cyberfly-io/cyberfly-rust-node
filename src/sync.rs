@@ -605,12 +605,7 @@ impl SyncManager {
                         }
                     }
 
-                    let pairs: Vec<(&str, &str)> = field_pairs
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.as_str()))
-                        .collect();
-
-                    self.storage.xadd(&full_key, "*", &pairs).await?;
+                    self.storage.xadd(&full_key, "*", &field_pairs).await?;
                 }
             }
             "timeseries" => {

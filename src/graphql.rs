@@ -1,19 +1,19 @@
-use async_graphql::{Context, Object, Schema, SimpleObject, InputObject, Subscription};
+use anyhow::Result;
 use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;
+use async_graphql::{Context, InputObject, Object, Schema, SimpleObject, Subscription};
+use async_graphql_axum::{GraphQLProtocol, GraphQLRequest, GraphQLResponse, GraphQLWebSocket};
 use axum::{
-    routing::get,
-    Router,
-    response::{Html, IntoResponse},
     extract::ws::WebSocketUpgrade,
     http::StatusCode,
+    response::{Html, IntoResponse},
+    routing::get,
+    Router,
 };
-use async_graphql_axum::{GraphQLRequest, GraphQLResponse, GraphQLWebSocket, GraphQLProtocol};
-use anyhow::Result;
-use tokio_stream::{Stream, StreamExt};
-use tokio::sync::broadcast;
 use std::sync::Arc;
+use tokio::sync::broadcast;
+use tokio_stream::{Stream, StreamExt};
 
-use crate::{storage::RedisStorage, crypto, error::DbError, ipfs::IpfsStorage, sync::SyncManager};
+use crate::{crypto, error::DbError, ipfs::IpfsStorage, storage::RedisStorage, sync::SyncManager};
 
 #[derive(SimpleObject, Clone)]
 pub struct StorageResult {
@@ -173,12 +173,19 @@ pub struct QueryRoot;
 #[Object]
 impl QueryRoot {
     /// Get a string value from storage
-    async fn get_string(&self, ctx: &Context<'_>, db_name: String, key: String) -> Result<QueryResult, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_string(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+    ) -> Result<QueryResult, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
         let value = storage.get_string(&full_key).await.map_err(DbError::from)?;
-        
+
         Ok(QueryResult {
             key: full_key,
             value,
@@ -186,12 +193,23 @@ impl QueryRoot {
     }
 
     /// Get a hash field from storage
-    async fn get_hash(&self, ctx: &Context<'_>, db_name: String, key: String, field: String) -> Result<QueryResult, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_hash(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        field: String,
+    ) -> Result<QueryResult, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        let value = storage.get_hash(&full_key, &field).await.map_err(DbError::from)?;
-        
+        let value = storage
+            .get_hash(&full_key, &field)
+            .await
+            .map_err(DbError::from)?;
+
         Ok(QueryResult {
             key: format!("{}:{}", full_key, field),
             value,
@@ -199,56 +217,108 @@ impl QueryRoot {
     }
 
     /// Get all hash fields from storage
-    async fn get_all_hash(&self, ctx: &Context<'_>, db_name: String, key: String) -> Result<Vec<QueryResult>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_all_hash(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+    ) -> Result<Vec<QueryResult>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        let fields = storage.get_all_hash(&full_key).await.map_err(DbError::from)?;
-        
-        Ok(fields.into_iter().map(|(field, value)| QueryResult {
-            key: format!("{}:{}", full_key, field),
-            value: Some(value),
-        }).collect())
+        let fields = storage
+            .get_all_hash(&full_key)
+            .await
+            .map_err(DbError::from)?;
+
+        Ok(fields
+            .into_iter()
+            .map(|(field, value)| QueryResult {
+                key: format!("{}:{}", full_key, field),
+                value: Some(value),
+            })
+            .collect())
     }
 
     /// Get list items from storage
-    async fn get_list(&self, ctx: &Context<'_>, db_name: String, key: String, start: Option<i32>, stop: Option<i32>) -> Result<Vec<String>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_list(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        start: Option<i32>,
+        stop: Option<i32>,
+    ) -> Result<Vec<String>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
         let start = start.unwrap_or(0) as isize;
         let stop = stop.unwrap_or(-1) as isize;
-        
-        storage.get_list(&full_key, start, stop).await.map_err(DbError::from)
+
+        storage
+            .get_list(&full_key, start, stop)
+            .await
+            .map_err(DbError::from)
     }
 
     /// Get set members from storage
-    async fn get_set(&self, ctx: &Context<'_>, db_name: String, key: String) -> Result<Vec<String>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_set(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+    ) -> Result<Vec<String>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
         storage.get_set(&full_key).await.map_err(DbError::from)
     }
 
     /// Get sorted set range from storage
-    async fn get_sorted_set(&self, ctx: &Context<'_>, db_name: String, key: String, start: Option<i32>, stop: Option<i32>) -> Result<Vec<SortedSetEntry>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_sorted_set(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        start: Option<i32>,
+        stop: Option<i32>,
+    ) -> Result<Vec<SortedSetEntry>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
         let start = start.unwrap_or(0) as isize;
         let stop = stop.unwrap_or(-1) as isize;
-        
-        let results = storage.get_sorted_set_with_scores(&full_key, start, stop).await.map_err(DbError::from)?;
-        Ok(results.into_iter().map(|(value, score)| SortedSetEntry { value, score }).collect())
+
+        let results = storage
+            .get_sorted_set_with_scores(&full_key, start, stop)
+            .await
+            .map_err(DbError::from)?;
+        Ok(results
+            .into_iter()
+            .map(|(value, score)| SortedSetEntry { value, score })
+            .collect())
     }
 
     /// Get file from IPFS by CID (hash)
     async fn get_ipfs_file(&self, ctx: &Context<'_>, cid: String) -> Result<String, DbError> {
-        let ipfs = ctx.data::<IpfsStorage>().map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
-        
+        let ipfs = ctx
+            .data::<IpfsStorage>()
+            .map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
+
         // Use get_bytes (cid is actually a hash string in Iroh)
-        let data = ipfs.get_bytes(&cid).await.map_err(|e| DbError::InternalError(e.to_string()))?;
-        
+        let data = ipfs
+            .get_bytes(&cid)
+            .await
+            .map_err(|e| DbError::InternalError(e.to_string()))?;
+
         // Convert bytes to base64 for transport
         use base64::Engine;
         Ok(base64::engine::general_purpose::STANDARD.encode(&data))
@@ -257,8 +327,10 @@ impl QueryRoot {
     /// List all pinned CIDs
     /// Note: Iroh doesn't have traditional "pinning" - all added content is persistent
     async fn list_ipfs_pins(&self, ctx: &Context<'_>) -> Result<Vec<String>, DbError> {
-        let _ipfs = ctx.data::<IpfsStorage>().map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
-        
+        let _ipfs = ctx
+            .data::<IpfsStorage>()
+            .map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
+
         // TODO: Implement listing all stored blobs in Iroh
         // For now, return empty list
         Ok(vec![])
@@ -267,12 +339,23 @@ impl QueryRoot {
     // ============ JSON Queries ============
 
     /// Get JSON document or specific path
-    async fn get_json(&self, ctx: &Context<'_>, db_name: String, key: String, path: Option<String>) -> Result<QueryResult, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_json(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        path: Option<String>,
+    ) -> Result<QueryResult, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        let value = storage.get_json(&full_key, path.as_deref()).await.map_err(DbError::from)?;
-        
+        let value = storage
+            .get_json(&full_key, path.as_deref())
+            .await
+            .map_err(DbError::from)?;
+
         Ok(QueryResult {
             key: full_key,
             value,
@@ -280,12 +363,23 @@ impl QueryRoot {
     }
 
     /// Filter JSON by JSONPath
-    async fn filter_json(&self, ctx: &Context<'_>, db_name: String, key: String, json_path: String) -> Result<QueryResult, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn filter_json(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        json_path: String,
+    ) -> Result<QueryResult, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        let value = storage.filter_json(&full_key, &json_path).await.map_err(DbError::from)?;
-        
+        let value = storage
+            .filter_json(&full_key, &json_path)
+            .await
+            .map_err(DbError::from)?;
+
         Ok(QueryResult {
             key: full_key,
             value,
@@ -295,89 +389,181 @@ impl QueryRoot {
     // ============ Stream Queries ============
 
     /// Get stream entries by range
-    async fn get_stream(&self, ctx: &Context<'_>, db_name: String, key: String, start: Option<String>, end: Option<String>, count: Option<i32>) -> Result<Vec<StreamEntry>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_stream(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        start: Option<String>,
+        end: Option<String>,
+        count: Option<i32>,
+    ) -> Result<Vec<StreamEntry>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
         let start = start.as_deref().unwrap_or("-");
         let end = end.as_deref().unwrap_or("+");
         let count_val = count.map(|c| c as usize);
-        
-        let entries = storage.xrange(&full_key, start, end, count_val).await.map_err(DbError::from)?;
-        
-        Ok(entries.into_iter().map(|(id, fields)| StreamEntry {
-            id,
-            fields: fields.into_iter().map(|(k, v)| StreamField { key: k, value: v }).collect(),
-        }).collect())
+
+        let entries = storage
+            .xrange(&full_key, start, end, count_val)
+            .await
+            .map_err(DbError::from)?;
+
+        Ok(entries
+            .into_iter()
+            .map(|(id, fields)| StreamEntry {
+                id,
+                fields: fields
+                    .into_iter()
+                    .map(|(k, v)| StreamField { key: k, value: v })
+                    .collect(),
+            })
+            .collect())
     }
 
     /// Filter stream entries by pattern
-    async fn filter_stream(&self, ctx: &Context<'_>, db_name: String, key: String, start: Option<String>, end: Option<String>, pattern: Option<String>) -> Result<Vec<StreamEntry>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn filter_stream(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        start: Option<String>,
+        end: Option<String>,
+        pattern: Option<String>,
+    ) -> Result<Vec<StreamEntry>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
         let start = start.as_deref().unwrap_or("-");
         let end = end.as_deref().unwrap_or("+");
-        
-        let entries = storage.filter_stream(&full_key, start, end, pattern.as_deref()).await.map_err(DbError::from)?;
-        
-        Ok(entries.into_iter().map(|(id, fields)| StreamEntry {
-            id,
-            fields: fields.into_iter().map(|(k, v)| StreamField { key: k, value: v }).collect(),
-        }).collect())
+
+        let entries = storage
+            .filter_stream(&full_key, start, end, pattern.as_deref())
+            .await
+            .map_err(DbError::from)?;
+
+        Ok(entries
+            .into_iter()
+            .map(|(id, fields)| StreamEntry {
+                id,
+                fields: fields
+                    .into_iter()
+                    .map(|(k, v)| StreamField { key: k, value: v })
+                    .collect(),
+            })
+            .collect())
     }
 
     /// Get stream length
-    async fn get_stream_length(&self, ctx: &Context<'_>, db_name: String, key: String) -> Result<i32, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_stream_length(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+    ) -> Result<i32, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
         let length = storage.xlen(&full_key).await.map_err(DbError::from)?;
-        
+
         Ok(length as i32)
     }
 
     // ============ TimeSeries Queries ============
 
     /// Get time series data by time range
-    async fn get_timeseries(&self, ctx: &Context<'_>, db_name: String, key: String, from_timestamp: String, to_timestamp: String) -> Result<Vec<TimeSeriesPoint>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_timeseries(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        from_timestamp: String,
+        to_timestamp: String,
+    ) -> Result<Vec<TimeSeriesPoint>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        let from_ts = from_timestamp.parse::<i64>().map_err(|_| DbError::InvalidData("Invalid from_timestamp".to_string()))?;
-        let to_ts = to_timestamp.parse::<i64>().map_err(|_| DbError::InvalidData("Invalid to_timestamp".to_string()))?;
-        
-        let data = storage.ts_range(&full_key, from_ts, to_ts).await.map_err(DbError::from)?;
-        
-        Ok(data.into_iter().map(|(ts, val)| TimeSeriesPoint {
-            timestamp: ts.to_string(),
-            value: val,
-        }).collect())
+        let from_ts = from_timestamp
+            .parse::<i64>()
+            .map_err(|_| DbError::InvalidData("Invalid from_timestamp".to_string()))?;
+        let to_ts = to_timestamp
+            .parse::<i64>()
+            .map_err(|_| DbError::InvalidData("Invalid to_timestamp".to_string()))?;
+
+        let data = storage
+            .ts_range(&full_key, from_ts, to_ts)
+            .await
+            .map_err(DbError::from)?;
+
+        Ok(data
+            .into_iter()
+            .map(|(ts, val)| TimeSeriesPoint {
+                timestamp: ts.to_string(),
+                value: val,
+            })
+            .collect())
     }
 
     /// Filter time series by value range
-    async fn filter_timeseries(&self, ctx: &Context<'_>, db_name: String, key: String, from_timestamp: String, to_timestamp: String, min_value: Option<f64>, max_value: Option<f64>) -> Result<Vec<TimeSeriesPoint>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn filter_timeseries(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        from_timestamp: String,
+        to_timestamp: String,
+        min_value: Option<f64>,
+        max_value: Option<f64>,
+    ) -> Result<Vec<TimeSeriesPoint>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        let from_ts = from_timestamp.parse::<i64>().map_err(|_| DbError::InvalidData("Invalid from_timestamp".to_string()))?;
-        let to_ts = to_timestamp.parse::<i64>().map_err(|_| DbError::InvalidData("Invalid to_timestamp".to_string()))?;
-        
-        let data = storage.filter_timeseries(&full_key, from_ts, to_ts, min_value, max_value).await.map_err(DbError::from)?;
-        
-        Ok(data.into_iter().map(|(ts, val)| TimeSeriesPoint {
-            timestamp: ts.to_string(),
-            value: val,
-        }).collect())
+        let from_ts = from_timestamp
+            .parse::<i64>()
+            .map_err(|_| DbError::InvalidData("Invalid from_timestamp".to_string()))?;
+        let to_ts = to_timestamp
+            .parse::<i64>()
+            .map_err(|_| DbError::InvalidData("Invalid to_timestamp".to_string()))?;
+
+        let data = storage
+            .filter_timeseries(&full_key, from_ts, to_ts, min_value, max_value)
+            .await
+            .map_err(DbError::from)?;
+
+        Ok(data
+            .into_iter()
+            .map(|(ts, val)| TimeSeriesPoint {
+                timestamp: ts.to_string(),
+                value: val,
+            })
+            .collect())
     }
 
     /// Get latest time series value
-    async fn get_latest_timeseries(&self, ctx: &Context<'_>, db_name: String, key: String) -> Result<Option<TimeSeriesPoint>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_latest_timeseries(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+    ) -> Result<Option<TimeSeriesPoint>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
         let data = storage.ts_get(&full_key).await.map_err(DbError::from)?;
-        
+
         Ok(data.map(|(ts, val)| TimeSeriesPoint {
             timestamp: ts.to_string(),
             value: val,
@@ -387,12 +573,23 @@ impl QueryRoot {
     // ============ Geospatial Queries ============
 
     /// Get location of a member
-    async fn get_geo_location(&self, ctx: &Context<'_>, db_name: String, key: String, member: String) -> Result<Option<GeoLocation>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_geo_location(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        member: String,
+    ) -> Result<Option<GeoLocation>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        let pos = storage.geopos(&full_key, &member).await.map_err(DbError::from)?;
-        
+        let pos = storage
+            .geopos(&full_key, &member)
+            .await
+            .map_err(DbError::from)?;
+
         Ok(pos.map(|(lon, lat)| GeoLocation {
             member: member.clone(),
             longitude: Some(lon),
@@ -401,102 +598,225 @@ impl QueryRoot {
     }
 
     /// Search locations within radius
-    async fn search_geo_radius(&self, ctx: &Context<'_>, db_name: String, key: String, longitude: f64, latitude: f64, radius: f64, unit: Option<String>) -> Result<Vec<GeoResult>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn search_geo_radius(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        longitude: f64,
+        latitude: f64,
+        radius: f64,
+        unit: Option<String>,
+    ) -> Result<Vec<GeoResult>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
         let unit_str = unit.as_deref().unwrap_or("m");
-        
-        let results = storage.georadius_with_coords(&full_key, longitude, latitude, radius, unit_str).await.map_err(DbError::from)?;
-        Ok(results.into_iter().map(|(member, lon, lat)| GeoResult { member, longitude: lon, latitude: lat }).collect())
+
+        let results = storage
+            .georadius_with_coords(&full_key, longitude, latitude, radius, unit_str)
+            .await
+            .map_err(DbError::from)?;
+        Ok(results
+            .into_iter()
+            .map(|(member, lon, lat)| GeoResult {
+                member,
+                longitude: lon,
+                latitude: lat,
+            })
+            .collect())
     }
 
     /// Search locations within radius from member
-    async fn search_geo_radius_by_member(&self, ctx: &Context<'_>, db_name: String, key: String, member: String, radius: f64, unit: Option<String>) -> Result<Vec<GeoResult>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn search_geo_radius_by_member(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        member: String,
+        radius: f64,
+        unit: Option<String>,
+    ) -> Result<Vec<GeoResult>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
         let unit_str = unit.as_deref().unwrap_or("m");
-        
-        let results = storage.georadiusbymember_with_coords(&full_key, &member, radius, unit_str).await.map_err(DbError::from)?;
-        Ok(results.into_iter().map(|(member, lon, lat)| GeoResult { member, longitude: lon, latitude: lat }).collect())
+
+        let results = storage
+            .georadiusbymember_with_coords(&full_key, &member, radius, unit_str)
+            .await
+            .map_err(DbError::from)?;
+        Ok(results
+            .into_iter()
+            .map(|(member, lon, lat)| GeoResult {
+                member,
+                longitude: lon,
+                latitude: lat,
+            })
+            .collect())
     }
 
     /// Calculate distance between two members
-    async fn get_geo_distance(&self, ctx: &Context<'_>, db_name: String, key: String, member1: String, member2: String, unit: Option<String>) -> Result<Option<f64>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn get_geo_distance(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        member1: String,
+        member2: String,
+        unit: Option<String>,
+    ) -> Result<Option<f64>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        
-        storage.geodist(&full_key, &member1, &member2, unit.as_deref()).await.map_err(DbError::from)
+
+        storage
+            .geodist(&full_key, &member1, &member2, unit.as_deref())
+            .await
+            .map_err(DbError::from)
     }
 
     // ============ Filter Queries for Basic Types ============
 
     /// Filter hash fields by pattern
-    async fn filter_hash(&self, ctx: &Context<'_>, db_name: String, key: String, field_pattern: String) -> Result<Vec<QueryResult>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn filter_hash(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        field_pattern: String,
+    ) -> Result<Vec<QueryResult>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        let fields = storage.filter_hash(&full_key, &field_pattern).await.map_err(DbError::from)?;
-        
-        Ok(fields.into_iter().map(|(field, value)| QueryResult {
-            key: format!("{}:{}", full_key, field),
-            value: Some(value),
-        }).collect())
+        let fields = storage
+            .filter_hash(&full_key, &field_pattern)
+            .await
+            .map_err(DbError::from)?;
+
+        Ok(fields
+            .into_iter()
+            .map(|(field, value)| QueryResult {
+                key: format!("{}:{}", full_key, field),
+                value: Some(value),
+            })
+            .collect())
     }
 
     /// Filter list by value pattern
-    async fn filter_list(&self, ctx: &Context<'_>, db_name: String, key: String, value_pattern: String) -> Result<Vec<String>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn filter_list(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        value_pattern: String,
+    ) -> Result<Vec<String>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        storage.filter_list(&full_key, &value_pattern).await.map_err(DbError::from)
+        storage
+            .filter_list(&full_key, &value_pattern)
+            .await
+            .map_err(DbError::from)
     }
 
     /// Filter set by member pattern
-    async fn filter_set(&self, ctx: &Context<'_>, db_name: String, key: String, member_pattern: String) -> Result<Vec<String>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn filter_set(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        member_pattern: String,
+    ) -> Result<Vec<String>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        storage.filter_set(&full_key, &member_pattern).await.map_err(DbError::from)
+        storage
+            .filter_set(&full_key, &member_pattern)
+            .await
+            .map_err(DbError::from)
     }
 
     /// Filter sorted set by score range
-    async fn filter_sorted_set(&self, ctx: &Context<'_>, db_name: String, key: String, min_score: f64, max_score: f64) -> Result<Vec<SortedSetEntry>, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn filter_sorted_set(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        min_score: f64,
+        max_score: f64,
+    ) -> Result<Vec<SortedSetEntry>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         let full_key = format!("{}:{}", db_name, key);
-        let results = storage.filter_sorted_set_with_scores(&full_key, min_score, max_score).await.map_err(DbError::from)?;
-        Ok(results.into_iter().map(|(value, score)| SortedSetEntry { value, score }).collect())
+        let results = storage
+            .filter_sorted_set_with_scores(&full_key, min_score, max_score)
+            .await
+            .map_err(DbError::from)?;
+        Ok(results
+            .into_iter()
+            .map(|(value, score)| SortedSetEntry { value, score })
+            .collect())
     }
 
     // ============ IoT Queries ============
 
     /// Get recent IoT messages
-    async fn get_iot_messages(&self, ctx: &Context<'_>, topic_filter: Option<String>, limit: Option<i32>) -> Result<Vec<IotMessage>, DbError> {
+    async fn get_iot_messages(
+        &self,
+        ctx: &Context<'_>,
+        topic_filter: Option<String>,
+        limit: Option<i32>,
+    ) -> Result<Vec<IotMessage>, DbError> {
         use crate::mqtt_bridge::MqttMessageStore;
-        
-        let store = ctx.data::<MqttMessageStore>().map_err(|_| DbError::InternalError("MQTT message store not found".to_string()))?;
-        
-        let messages = store.get_messages(topic_filter, limit.map(|l| l as usize)).await;
-        
-        Ok(messages.into_iter().map(|m| IotMessage {
-            topic: m.topic,
-            payload: String::from_utf8_lossy(&m.payload).to_string(),
-            timestamp: m.timestamp.to_string(),
-        }).collect())
+
+        let store = ctx
+            .data::<MqttMessageStore>()
+            .map_err(|_| DbError::InternalError("MQTT message store not found".to_string()))?;
+
+        let messages = store
+            .get_messages(topic_filter, limit.map(|l| l as usize))
+            .await;
+
+        Ok(messages
+            .into_iter()
+            .map(|m| IotMessage {
+                topic: m.topic,
+                payload: String::from_utf8_lossy(&m.payload).to_string(),
+                timestamp: m.timestamp.to_string(),
+            })
+            .collect())
     }
 
     // ============ Blob Operation Queries ============
 
     /// Get all blob operations for a specific database
-    async fn get_blob_operations(&self, ctx: &Context<'_>, db_name: String, limit: Option<i32>) -> Result<Vec<BlobOperation>, DbError> {
-        let sync_manager = ctx.data::<SyncManager>()
+    async fn get_blob_operations(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        limit: Option<i32>,
+    ) -> Result<Vec<BlobOperation>, DbError> {
+        let sync_manager = ctx
+            .data::<SyncManager>()
             .map_err(|_| DbError::InternalError("SyncManager not found".to_string()))?;
-        
+
         let all_operations = sync_manager.sync_store().get_all_operations().await;
-        
+
         // Filter by database name
         let filtered_ops: Vec<BlobOperation> = all_operations
             .into_iter()
@@ -520,17 +840,22 @@ impl QueryRoot {
                 signature: op.signature,
             })
             .collect();
-        
+
         Ok(filtered_ops)
     }
 
     /// Get all blob operations (across all databases)
-    async fn get_all_blob_operations(&self, ctx: &Context<'_>, limit: Option<i32>) -> Result<Vec<BlobOperation>, DbError> {
-        let sync_manager = ctx.data::<SyncManager>()
+    async fn get_all_blob_operations(
+        &self,
+        ctx: &Context<'_>,
+        limit: Option<i32>,
+    ) -> Result<Vec<BlobOperation>, DbError> {
+        let sync_manager = ctx
+            .data::<SyncManager>()
             .map_err(|_| DbError::InternalError("SyncManager not found".to_string()))?;
-        
+
         let all_operations = sync_manager.sync_store().get_all_operations().await;
-        
+
         // Apply limit
         let limited_ops: Vec<BlobOperation> = all_operations
             .into_iter()
@@ -553,20 +878,28 @@ impl QueryRoot {
                 signature: op.signature,
             })
             .collect();
-        
+
         Ok(limited_ops)
     }
 
     /// Get blob operations by database name since a specific timestamp
-    async fn get_blob_operations_since(&self, ctx: &Context<'_>, db_name: String, timestamp: String, limit: Option<i32>) -> Result<Vec<BlobOperation>, DbError> {
-        let sync_manager = ctx.data::<SyncManager>()
+    async fn get_blob_operations_since(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        timestamp: String,
+        limit: Option<i32>,
+    ) -> Result<Vec<BlobOperation>, DbError> {
+        let sync_manager = ctx
+            .data::<SyncManager>()
             .map_err(|_| DbError::InternalError("SyncManager not found".to_string()))?;
-        
-        let ts = timestamp.parse::<i64>()
+
+        let ts = timestamp
+            .parse::<i64>()
             .map_err(|_| DbError::InvalidData("Invalid timestamp".to_string()))?;
-        
+
         let operations = sync_manager.sync_store().get_operations_since(ts).await;
-        
+
         // Filter by database name
         let filtered_ops: Vec<BlobOperation> = operations
             .into_iter()
@@ -590,15 +923,20 @@ impl QueryRoot {
                 signature: op.signature,
             })
             .collect();
-        
+
         Ok(filtered_ops)
     }
 
     /// Get count of blob operations for a database
-    async fn get_blob_operation_count(&self, ctx: &Context<'_>, db_name: Option<String>) -> Result<i32, DbError> {
-        let sync_manager = ctx.data::<SyncManager>()
+    async fn get_blob_operation_count(
+        &self,
+        ctx: &Context<'_>,
+        db_name: Option<String>,
+    ) -> Result<i32, DbError> {
+        let sync_manager = ctx
+            .data::<SyncManager>()
             .map_err(|_| DbError::InternalError("SyncManager not found".to_string()))?;
-        
+
         if let Some(db) = db_name {
             // Count operations for specific database
             let all_operations = sync_manager.sync_store().get_all_operations().await;
@@ -615,17 +953,18 @@ impl QueryRoot {
 
     /// Get node information including peer connections and health
     async fn get_node_info(&self, ctx: &Context<'_>) -> Result<NodeInfo, DbError> {
-        let endpoint = ctx.data::<iroh::Endpoint>()
+        let endpoint = ctx
+            .data::<iroh::Endpoint>()
             .map_err(|_| DbError::InternalError("Endpoint not found".to_string()))?;
-        
+
         let node_id = endpoint.node_id().to_string();
-        
+
         // Get basic stats from endpoint
         // Note: Iroh doesn't expose peer count directly, so we return placeholder values
         let connected_peers = 0; // TODO: Track peers from gossip events
         let discovered_peers = 0;
         let uptime_seconds = 0u64; // TODO: Track uptime
-        
+
         // Determine health status
         let health = if connected_peers > 0 {
             "healthy"
@@ -634,7 +973,7 @@ impl QueryRoot {
         } else {
             "isolated"
         };
-        
+
         Ok(NodeInfo {
             node_id: node_id.clone(),
             peer_id: node_id,
@@ -648,9 +987,10 @@ impl QueryRoot {
 
     /// Get list of connected peers
     async fn get_connected_peers(&self, ctx: &Context<'_>) -> Result<Vec<PeerInfo>, DbError> {
-        let _endpoint = ctx.data::<iroh::Endpoint>()
+        let _endpoint = ctx
+            .data::<iroh::Endpoint>()
             .map_err(|_| DbError::InternalError("Endpoint not found".to_string()))?;
-        
+
         // TODO: Implement peer tracking from gossip events
         // For now, return empty list
         Ok(Vec::new())
@@ -658,21 +998,23 @@ impl QueryRoot {
 
     /// Get list of discovered peers (not necessarily connected)
     async fn get_discovered_peers(&self, ctx: &Context<'_>) -> Result<Vec<PeerInfo>, DbError> {
-        let peers_map = ctx.data::<std::sync::Arc<dashmap::DashMap<iroh::NodeId, chrono::DateTime<chrono::Utc>>>>()
+        let peers_map = ctx
+            .data::<std::sync::Arc<dashmap::DashMap<iroh::NodeId, chrono::DateTime<chrono::Utc>>>>()
             .map_err(|_| DbError::InternalError("Discovered peers map not found".to_string()))?;
-        
+
         let peers: Vec<(iroh::NodeId, chrono::DateTime<chrono::Utc>)> = peers_map
             .iter()
             .map(|entry| (*entry.key(), *entry.value()))
             .collect();
-        
-        Ok(peers.into_iter().map(|(node_id, last_seen)| {
-            PeerInfo {
+
+        Ok(peers
+            .into_iter()
+            .map(|(node_id, last_seen)| PeerInfo {
                 peer_id: node_id.to_string(),
                 last_seen: last_seen.to_rfc3339(),
                 connection_status: "connected".to_string(),
-            }
-        }).collect())
+            })
+            .collect())
     }
 }
 
@@ -681,31 +1023,42 @@ pub struct MutationRoot;
 #[Object]
 impl MutationRoot {
     /// Submit signed data to the database
-    async fn submit_data(&self, ctx: &Context<'_>, input: SignedData) -> Result<StorageResult, DbError> {
-        let storage = ctx.data::<RedisStorage>().map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
-        
+    async fn submit_data(
+        &self,
+        ctx: &Context<'_>,
+        input: SignedData,
+    ) -> Result<StorageResult, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
         // Verify database name matches public key
-        crypto::verify_db_name(&input.db_name, &input.public_key)
-            .map_err(|e| DbError::SignatureError(format!("Database name verification failed: {}", e)))?;
-        
+        crypto::verify_db_name(&input.db_name, &input.public_key).map_err(|e| {
+            DbError::SignatureError(format!("Database name verification failed: {}", e))
+        })?;
+
         // Decode public key and signature from hex
         let public_key_bytes = hex::decode(&input.public_key)
             .map_err(|e| DbError::InvalidData(format!("Invalid public key hex: {}", e)))?;
         let signature_bytes = hex::decode(&input.signature)
             .map_err(|e| DbError::InvalidData(format!("Invalid signature hex: {}", e)))?;
-        
+
         // Create message to verify (db_name:key:value)
         let message = format!("{}:{}:{}", input.db_name, input.key, input.value);
-        
+
         // Verify signature
         crypto::verify_signature(&public_key_bytes, message.as_bytes(), &signature_bytes)
             .map_err(|e| DbError::SignatureError(e.to_string()))?;
-        
-        tracing::info!("Signature verified for db: {}, key: {}", input.db_name, input.key);
-        
+
+        tracing::info!(
+            "Signature verified for db: {}, key: {}",
+            input.db_name,
+            input.key
+        );
+
         // Create full key with database namespace
         let full_key = format!("{}:{}", input.db_name, input.key);
-        
+
         // Clone fields we'll need later for SignedOperation (before they're moved)
         let field_clone = input.field.clone();
         let score_clone = input.score;
@@ -714,77 +1067,127 @@ impl MutationRoot {
         let ts_timestamp_clone = input.timestamp.clone();
         let longitude_clone = input.longitude;
         let latitude_clone = input.latitude;
-        
+
         // Store data based on type
         match input.store_type.to_lowercase().as_str() {
             "string" => {
-                storage.set_string(&full_key, &input.value).await.map_err(DbError::from)?;
+                storage
+                    .set_string(&full_key, &input.value)
+                    .await
+                    .map_err(DbError::from)?;
             }
             "hash" => {
-                let field = input.field.ok_or_else(|| DbError::InvalidData("Field required for Hash type".to_string()))?;
-                storage.set_hash(&full_key, &field, &input.value).await.map_err(DbError::from)?;
+                let field = input.field.ok_or_else(|| {
+                    DbError::InvalidData("Field required for Hash type".to_string())
+                })?;
+                storage
+                    .set_hash(&full_key, &field, &input.value)
+                    .await
+                    .map_err(DbError::from)?;
             }
             "list" => {
-                storage.push_list(&full_key, &input.value).await.map_err(DbError::from)?;
+                storage
+                    .push_list(&full_key, &input.value)
+                    .await
+                    .map_err(DbError::from)?;
             }
             "set" => {
-                storage.add_set(&full_key, &input.value).await.map_err(DbError::from)?;
+                storage
+                    .add_set(&full_key, &input.value)
+                    .await
+                    .map_err(DbError::from)?;
             }
             "sortedset" => {
-                let score = input.score.ok_or_else(|| DbError::InvalidData("Score required for SortedSet type".to_string()))?;
-                storage.add_sorted_set(&full_key, score, &input.value).await.map_err(DbError::from)?;
+                let score = input.score.ok_or_else(|| {
+                    DbError::InvalidData("Score required for SortedSet type".to_string())
+                })?;
+                storage
+                    .add_sorted_set(&full_key, score, &input.value)
+                    .await
+                    .map_err(DbError::from)?;
             }
             "json" => {
                 let path = input.json_path.as_deref().unwrap_or("$");
-                storage.set_json(&full_key, path, &input.value).await.map_err(DbError::from)?;
+                storage
+                    .set_json(&full_key, path, &input.value)
+                    .await
+                    .map_err(DbError::from)?;
             }
             "stream" => {
                 // Parse stream_fields JSON array: [{"key": "field1", "value": "val1"}, ...]
-                let fields_json = input.stream_fields.ok_or_else(|| DbError::InvalidData("stream_fields required for Stream type".to_string()))?;
-                let fields: Vec<serde_json::Value> = serde_json::from_str(&fields_json)
-                    .map_err(|e| DbError::InvalidData(format!("Invalid stream_fields JSON: {}", e)))?;
-                
+                let fields_json = input.stream_fields.ok_or_else(|| {
+                    DbError::InvalidData("stream_fields required for Stream type".to_string())
+                })?;
+                let fields: Vec<serde_json::Value> =
+                    serde_json::from_str(&fields_json).map_err(|e| {
+                        DbError::InvalidData(format!("Invalid stream_fields JSON: {}", e))
+                    })?;
+
                 let mut field_pairs: Vec<(&str, &str)> = Vec::new();
                 let mut owned_fields: Vec<(String, String)> = Vec::new();
-                
+
                 for field_obj in fields {
-                    if let (Some(k), Some(v)) = (field_obj.get("key").and_then(|k| k.as_str()), field_obj.get("value").and_then(|v| v.as_str())) {
+                    if let (Some(k), Some(v)) = (
+                        field_obj.get("key").and_then(|k| k.as_str()),
+                        field_obj.get("value").and_then(|v| v.as_str()),
+                    ) {
                         owned_fields.push((k.to_string(), v.to_string()));
                     }
                 }
-                
+                let mut field_pairs: Vec<(String, String)> = Vec::new();
+
                 for (k, v) in &owned_fields {
-                    field_pairs.push((k.as_str(), v.as_str()));
+                    field_pairs.push((k.clone(), v.clone()));
                 }
-                
-                storage.xadd(&full_key, "*", &field_pairs).await.map_err(DbError::from)?;
+
+                storage
+                    .xadd(&full_key, "*", &field_pairs)
+                    .await
+                    .map_err(DbError::from)?;
             }
             "timeseries" => {
-                let timestamp_str = input.timestamp.ok_or_else(|| DbError::InvalidData("timestamp required for TimeSeries type".to_string()))?;
-                let timestamp = timestamp_str.parse::<i64>()
+                let timestamp_str = input.timestamp.ok_or_else(|| {
+                    DbError::InvalidData("timestamp required for TimeSeries type".to_string())
+                })?;
+                let timestamp = timestamp_str
+                    .parse::<i64>()
                     .map_err(|_| DbError::InvalidData("Invalid timestamp format".to_string()))?;
-                let value = input.value.parse::<f64>()
-                    .map_err(|_| DbError::InvalidData("Value must be a number for TimeSeries type".to_string()))?;
-                
-                storage.ts_add(&full_key, timestamp, value).await.map_err(DbError::from)?;
+                let value = input.value.parse::<f64>().map_err(|_| {
+                    DbError::InvalidData("Value must be a number for TimeSeries type".to_string())
+                })?;
+
+                storage
+                    .ts_add(&full_key, timestamp, value)
+                    .await
+                    .map_err(DbError::from)?;
             }
             "geo" => {
-                let longitude = input.longitude.ok_or_else(|| DbError::InvalidData("longitude required for Geo type".to_string()))?;
-                let latitude = input.latitude.ok_or_else(|| DbError::InvalidData("latitude required for Geo type".to_string()))?;
-                
-                storage.geoadd(&full_key, longitude, latitude, &input.value).await.map_err(DbError::from)?;
+                let longitude = input.longitude.ok_or_else(|| {
+                    DbError::InvalidData("longitude required for Geo type".to_string())
+                })?;
+                let latitude = input.latitude.ok_or_else(|| {
+                    DbError::InvalidData("latitude required for Geo type".to_string())
+                })?;
+
+                storage
+                    .geoadd(&full_key, longitude, latitude, &input.value)
+                    .await
+                    .map_err(DbError::from)?;
             }
             _ => {
-                return Err(DbError::InvalidData(format!("Unknown store type: {}", input.store_type)));
+                return Err(DbError::InvalidData(format!(
+                    "Unknown store type: {}",
+                    input.store_type
+                )));
             }
         }
-        
+
         // Create SignedOperation for the sync system
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        
+
         let signed_operation = crate::sync::SignedOperation {
             op_id: uuid::Uuid::new_v4().to_string(),
             timestamp,
@@ -802,13 +1205,20 @@ impl MutationRoot {
             public_key: input.public_key.clone(),
             signature: input.signature.clone(),
         };
-        
+
         // Add operation to SyncManager (stores in blob storage)
         if let Ok(sync_manager) = ctx.data::<SyncManager>() {
-            match sync_manager.sync_store().add_operation(signed_operation.clone()).await {
+            match sync_manager
+                .sync_store()
+                .add_operation(signed_operation.clone())
+                .await
+            {
                 Ok(added) => {
                     if added {
-                        tracing::debug!("Operation added to blob storage: {}", signed_operation.op_id);
+                        tracing::debug!(
+                            "Operation added to blob storage: {}",
+                            signed_operation.op_id
+                        );
                     }
                 }
                 Err(e) => {
@@ -817,7 +1227,7 @@ impl MutationRoot {
                 }
             }
         }
-        
+
         // Broadcast message event to subscribers if broadcast channel is available
         if let Ok(broadcast_tx) = ctx.data::<broadcast::Sender<MessageEvent>>() {
             let event = MessageEvent {
@@ -825,24 +1235,32 @@ impl MutationRoot {
                 payload: input.value.as_bytes().to_vec(),
                 timestamp,
             };
-            
+
             // Ignore send errors (no active subscribers)
             let _ = broadcast_tx.send(event);
         }
-        
+
         Ok(StorageResult {
             success: true,
-            message: format!("Data stored successfully in db: {}, key: {}", input.db_name, input.key),
+            message: format!(
+                "Data stored successfully in db: {}, key: {}",
+                input.db_name, input.key
+            ),
         })
     }
 
     /// Upload data to IPFS
     async fn add_to_ipfs(&self, ctx: &Context<'_>, data: String) -> Result<IpfsResult, DbError> {
-        let ipfs = ctx.data::<IpfsStorage>().map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
-        
+        let ipfs = ctx
+            .data::<IpfsStorage>()
+            .map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
+
         let bytes = data.as_bytes();
-        let cid = ipfs.add_bytes(bytes).await.map_err(|e| DbError::InternalError(e.to_string()))?;
-        
+        let cid = ipfs
+            .add_bytes(bytes)
+            .await
+            .map_err(|e| DbError::InternalError(e.to_string()))?;
+
         Ok(IpfsResult {
             success: true,
             cid: Some(cid.clone()),
@@ -853,21 +1271,28 @@ impl MutationRoot {
     /// Pin a CID in IPFS
     /// Note: Iroh doesn't have traditional "pinning" - all added content is persistent by default
     async fn pin_ipfs(&self, ctx: &Context<'_>, cid: String) -> Result<IpfsResult, DbError> {
-        let _ipfs = ctx.data::<IpfsStorage>().map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
-        
+        let _ipfs = ctx
+            .data::<IpfsStorage>()
+            .map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
+
         // No-op in Iroh - content is already persistent
         Ok(IpfsResult {
             success: true,
             cid: Some(cid.clone()),
-            message: format!("CID already persistent (Iroh doesn't need explicit pinning): {}", cid),
+            message: format!(
+                "CID already persistent (Iroh doesn't need explicit pinning): {}",
+                cid
+            ),
         })
     }
 
     /// Unpin a CID in IPFS
     /// Note: Iroh doesn't have traditional "unpinning" - garbage collection is handled differently
     async fn unpin_ipfs(&self, ctx: &Context<'_>, cid: String) -> Result<IpfsResult, DbError> {
-        let _ipfs = ctx.data::<IpfsStorage>().map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
-        
+        let _ipfs = ctx
+            .data::<IpfsStorage>()
+            .map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
+
         // No-op in Iroh
         Ok(IpfsResult {
             success: true,
@@ -879,24 +1304,31 @@ impl MutationRoot {
     // ============ IoT Mutations ============
 
     /// Publish message to IoT devices via MQTT
-    async fn publish_iot_message(&self, ctx: &Context<'_>, topic: String, payload: String, qos: Option<i32>) -> Result<IotPublishResult, DbError> {
-    use crate::mqtt_bridge::{GossipToMqttMessage, MessageOrigin};
-        use tokio::sync::mpsc;
+    async fn publish_iot_message(
+        &self,
+        ctx: &Context<'_>,
+        topic: String,
+        payload: String,
+        qos: Option<i32>,
+    ) -> Result<IotPublishResult, DbError> {
+        use crate::mqtt_bridge::{GossipToMqttMessage, MessageOrigin};
         use rumqttc::QoS;
-        use sha2::{Sha256, Digest};
-        
-        let mqtt_tx = ctx.data::<mpsc::UnboundedSender<GossipToMqttMessage>>()
+        use sha2::{Digest, Sha256};
+        use tokio::sync::mpsc;
+
+        let mqtt_tx = ctx
+            .data::<mpsc::UnboundedSender<GossipToMqttMessage>>()
             .map_err(|_| DbError::InternalError("MQTT bridge not available".to_string()))?;
-        
+
         let qos_level = match qos.unwrap_or(1) {
             0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
             2 => QoS::ExactlyOnce,
             _ => QoS::AtLeastOnce,
         };
-        
+
         let payload_bytes = payload.as_bytes().to_vec();
-        
+
         // Generate message ID
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -907,19 +1339,23 @@ impl MutationRoot {
         hasher.update(&payload_bytes);
         hasher.update(timestamp.to_le_bytes());
         let message_id = format!("{:x}", hasher.finalize());
-        
+
         let message = GossipToMqttMessage {
             topic: topic.clone(),
             payload: payload_bytes.clone(),
             qos: qos_level,
             message_id,
-            origin: MessageOrigin::Gossip,  // Originated from GraphQL API (gossip side)
+            origin: MessageOrigin::Gossip, // Originated from GraphQL API (gossip side)
         };
-        
-    mqtt_tx.send(message.clone()).map_err(|e| DbError::InternalError(format!("Failed to send to MQTT: {}", e)))?;
+
+        mqtt_tx
+            .send(message.clone())
+            .map_err(|e| DbError::InternalError(format!("Failed to send to MQTT: {}", e)))?;
 
         // Also forward this publish into the gossip network so other peers receive it.
-        if let Ok(mqtt_to_gossip) = ctx.data::<mpsc::UnboundedSender<crate::mqtt_bridge::MqttToGossipMessage>>() {
+        if let Ok(mqtt_to_gossip) =
+            ctx.data::<mpsc::UnboundedSender<crate::mqtt_bridge::MqttToGossipMessage>>()
+        {
             let mg_msg = crate::mqtt_bridge::MqttToGossipMessage {
                 topic: topic.clone(),
                 payload: payload_bytes.clone(),
@@ -928,8 +1364,7 @@ impl MutationRoot {
             // Best-effort send; ignore failures to avoid failing the GraphQL mutation
             let _ = mqtt_to_gossip.send(mg_msg);
         }
-        
-        
+
         Ok(IotPublishResult {
             success: true,
             topic: topic.clone(),
@@ -953,8 +1388,8 @@ impl SubscriptionRoot {
             .map_err(|_| DbError::InternalError("Message broadcast channel not found".to_string()))?
             .subscribe();
 
-        Ok(tokio_stream::wrappers::BroadcastStream::new(rx)
-            .filter_map(move |result| {
+        Ok(
+            tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |result| {
                 let topic_filter = topic_filter.clone();
                 match result {
                     Ok(event) => {
@@ -970,7 +1405,8 @@ impl SubscriptionRoot {
                     }
                     Err(_) => None,
                 }
-            }))
+            }),
+        )
     }
 
     /// Subscribe to all messages (no filter)
@@ -983,17 +1419,16 @@ impl SubscriptionRoot {
             .map_err(|_| DbError::InternalError("Message broadcast channel not found".to_string()))?
             .subscribe();
 
-        Ok(tokio_stream::wrappers::BroadcastStream::new(rx)
-            .filter_map(|result| {
-                match result {
-                    Ok(event) => Some(MessageUpdate {
-                        topic: event.topic,
-                        payload: String::from_utf8_lossy(&event.payload).to_string(),
-                        timestamp: event.timestamp.to_string(),
-                    }),
-                    Err(_) => None,
-                }
-            }))
+        Ok(
+            tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|result| match result {
+                Ok(event) => Some(MessageUpdate {
+                    topic: event.topic,
+                    payload: String::from_utf8_lossy(&event.payload).to_string(),
+                    timestamp: event.timestamp.to_string(),
+                }),
+                Err(_) => None,
+            }),
+        )
     }
 
     /// Subscribe to IoT messages with optional topic filter
@@ -1007,8 +1442,8 @@ impl SubscriptionRoot {
             .map_err(|_| DbError::InternalError("Message broadcast channel not found".to_string()))?
             .subscribe();
 
-        Ok(tokio_stream::wrappers::BroadcastStream::new(rx)
-            .filter_map(move |result| {
+        Ok(
+            tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |result| {
                 let filter = topic_filter.clone();
                 match result {
                     Ok(event) => {
@@ -1029,7 +1464,8 @@ impl SubscriptionRoot {
                     }
                     Err(_) => None,
                 }
-            }))
+            }),
+        )
     }
 }
 
@@ -1081,12 +1517,14 @@ pub type ApiSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 pub async fn create_server(
     storage: RedisStorage,
-    ipfs: IpfsStorage,  // Now passed in from main with shared network
+    ipfs: IpfsStorage, // Now passed in from main with shared network
     sync_manager: Option<SyncManager>,
-    endpoint: Option<iroh::Endpoint>,  // Pass Endpoint instead of wrapped IrohNetwork
-    discovered_peers: Option<Arc<dashmap::DashMap<iroh::NodeId, chrono::DateTime<chrono::Utc>>>>,  // Discovered peers map
+    endpoint: Option<iroh::Endpoint>, // Pass Endpoint instead of wrapped IrohNetwork
+    discovered_peers: Option<Arc<dashmap::DashMap<iroh::NodeId, chrono::DateTime<chrono::Utc>>>>, // Discovered peers map
     mqtt_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::GossipToMqttMessage>>,
-    mqtt_to_gossip_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::MqttToGossipMessage>>,
+    mqtt_to_gossip_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::MqttToGossipMessage>,
+    >,
     mqtt_store: Option<crate::mqtt_bridge::MqttMessageStore>,
     message_broadcast: Option<broadcast::Sender<MessageEvent>>,
 ) -> Result<Router> {
@@ -1095,29 +1533,29 @@ pub async fn create_server(
         let (tx, _) = broadcast::channel::<MessageEvent>(1000);
         tx
     });
-    
+
     let mut schema_builder = Schema::build(QueryRoot, MutationRoot, SubscriptionRoot)
-        .enable_federation()  // Enable GraphQL Federation
-        .enable_subscription_in_federation()  // Enable subscriptions in federation
+        .enable_federation() // Enable GraphQL Federation
+        .enable_subscription_in_federation() // Enable subscriptions in federation
         .data(storage)
         .data(ipfs)
         .data(broadcast_tx.clone());
-    
+
     // Add SyncManager if available
     if let Some(sync_mgr) = sync_manager {
         schema_builder = schema_builder.data(sync_mgr);
     }
-    
+
     // Add Endpoint if available
     if let Some(ep) = endpoint {
         schema_builder = schema_builder.data(ep);
     }
-    
+
     // Add discovered peers map if available
     if let Some(peers_map) = discovered_peers {
         schema_builder = schema_builder.data(peers_map);
     }
-    
+
     // Add MQTT components if available
     if let Some(tx) = mqtt_tx {
         schema_builder = schema_builder.data(tx);
@@ -1128,7 +1566,7 @@ pub async fn create_server(
     if let Some(store) = mqtt_store {
         schema_builder = schema_builder.data(store);
     }
-    
+
     let schema = schema_builder.finish();
 
     let app = Router::new()
@@ -1153,18 +1591,14 @@ async fn graphql_subscription_handler(
     protocol: GraphQLProtocol,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.protocols(ALL_WEBSOCKET_PROTOCOLS).on_upgrade(move |socket| {
-        GraphQLWebSocket::new(socket, schema.clone(), protocol).serve()
-    })
+    ws.protocols(ALL_WEBSOCKET_PROTOCOLS)
+        .on_upgrade(move |socket| GraphQLWebSocket::new(socket, schema.clone(), protocol).serve())
 }
 
 async fn graphql_playground() -> impl axum::response::IntoResponse {
-    axum::response::Html(
-        async_graphql::http::playground_source(
-            async_graphql::http::GraphQLPlaygroundConfig::new("/")
-                .subscription_endpoint("/ws"),
-        ),
-    )
+    axum::response::Html(async_graphql::http::playground_source(
+        async_graphql::http::GraphQLPlaygroundConfig::new("/").subscription_endpoint("/ws"),
+    ))
 }
 
 async fn graphiql_handler() -> impl IntoResponse {
@@ -1242,7 +1676,10 @@ async fn graphql_schema_handler(
 ) -> impl IntoResponse {
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
         schema.sdl(),
     )
 }

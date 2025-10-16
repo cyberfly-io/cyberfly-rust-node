@@ -29,9 +29,3 @@ impl From<anyhow::Error> for DbError {
         DbError::InternalError(err.to_string())
     }
 }
-
-impl From<redis::RedisError> for DbError {
-    fn from(err: redis::RedisError) -> Self {
-        DbError::StorageError(err.to_string())
-    }
-}
