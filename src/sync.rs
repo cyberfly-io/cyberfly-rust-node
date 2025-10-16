@@ -81,6 +81,8 @@ impl SignedOperation {
         let signature_bytes =
             hex::decode(&self.signature).map_err(|e| anyhow!("Invalid signature hex: {}", e))?;
 
+        tracing::debug!(op_id = %self.op_id, "Verifying SignedOperation signature");
+
         // Try full format first (op_id:timestamp:db_name:key:value)
         let full_message = format!(
             "{}:{}:{}:{}:{}",
@@ -90,18 +92,23 @@ impl SignedOperation {
         if crypto::verify_signature(&public_key_bytes, full_message.as_bytes(), &signature_bytes)
             .is_ok()
         {
+            tracing::debug!(op_id = %self.op_id, format = %full_message, "Signature verified with full format");
             return Ok(());
         }
 
         // Try short format (db_name:key:value) - used by GraphQL client
         let short_message = format!("{}:{}:{}", self.db_name, self.key, self.value);
-        crypto::verify_signature(
-            &public_key_bytes,
-            short_message.as_bytes(),
-            &signature_bytes,
-        )?;
-
-        Ok(())
+        match crypto::verify_signature(&public_key_bytes, short_message.as_bytes(), &signature_bytes)
+        {
+            Ok(_) => {
+                tracing::debug!(op_id = %self.op_id, format = %short_message, "Signature verified with short format");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(op_id = %self.op_id, "Signature verification failed for both formats: {}", e);
+                Err(e)
+            }
+        }
     }
 
     /// Get a comparable key for CRDT ordering (db_name:key:field)
@@ -391,10 +398,15 @@ impl SyncStore {
                 op.timestamp
             );
 
+            tracing::debug!(op_id = %op.op_id, "Operation will be persisted to blobs (if configured)");
+
             // Persist to blobs if available
             if let Err(e) = self.persist_operation(&op).await {
                 tracing::error!("Failed to persist operation {} to blobs: {}", op.op_id, e);
                 // Continue even if persistence fails (operation is in memory)
+            }
+            else {
+                tracing::debug!(op_id = %op.op_id, "Operation persisted to blobs successfully (or no store configured)");
             }
         }
 
