@@ -170,7 +170,7 @@ impl MqttBridge {
     /// Purge expired entries from recently_published set using the queue
     fn purge_expired_recently_published(&mut self) {
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-        while let Some((hash, expiry)) = self.recently_published_queue.front() {
+        while let Some(( _hash, expiry)) = self.recently_published_queue.front() {
             if *expiry <= now_ms {
                 // expired -> remove from both queue and set
                 if let Some((h, _)) = self.recently_published_queue.pop_front() {

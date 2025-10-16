@@ -12,11 +12,13 @@ mod sync; // Data synchronization with CRDT
 
 use anyhow::Result;
 use axum::{routing::get, Router};
+// Arc used in places during runtime; prefix to avoid unused import warning in some builds
+#[allow(unused_imports)]
 use std::sync::Arc;
 use tracing_subscriber;
 
 /// Start the Iroh Relay Server
-async fn start_relay_server(endpoint: iroh::Endpoint, bind_addr: String) -> Result<()> {
+async fn start_relay_server(_endpoint: iroh::Endpoint, bind_addr: String) -> Result<()> {
     tracing::info!("🔧 Initializing relay server on {}", bind_addr);
 
     // Parse the bind address
@@ -80,6 +82,8 @@ async fn main() -> Result<()> {
             let key_bytes = tokio::fs::read(&key_path).await?;
             iroh::SecretKey::try_from(&key_bytes[0..32])?
         } else {
+            // thread_rng is deprecated in some dependency versions; silence the local deprecation warning
+            #[allow(deprecated)]
             let key = iroh::SecretKey::generate(&mut rand::thread_rng());
             tokio::fs::write(&key_path, key.to_bytes()).await?;
             tracing::info!("Generated new Iroh secret key");
@@ -164,7 +168,8 @@ async fn main() -> Result<()> {
     tracing::info!("Iroh router spawned with shared components");
 
     // Initialize BlobStorage (Redis-like API on top of blob storage)
-    let storage = storage::BlobStorage::new(store.clone()).await?;
+    let sled_db_path = data_dir.join("sled_db");
+    let storage = storage::BlobStorage::new(store.clone(), Some(sled_db_path)).await?;
     tracing::info!("BlobStorage initialized (Redis-like API on blob store)");
 
     // Initialize IpfsStorage using shared Iroh components
@@ -175,6 +180,75 @@ async fn main() -> Result<()> {
     let sync_manager =
         sync::SyncManager::with_store(storage.clone(), node_id.into(), store.clone());
     tracing::info!("SyncManager initialized with persistent blob storage");
+
+    // Attempt to load previous sync index hashes from disk (if present)
+    let index_hash_path = data_dir.join("sync_index_hashes.json");
+    if index_hash_path.exists() {
+        match tokio::fs::read_to_string(&index_hash_path).await {
+            Ok(s) => {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&s) {
+                    // Load storage index if present
+                    if let Some(storage_hash) = json.get("storage_index_hash").and_then(|v| v.as_str()) {
+                        if let Ok(hash) = storage_hash.parse() {
+                            match storage.load_index_from_hash(hash).await {
+                                Ok(_) => tracing::info!("Loaded storage index from {}", storage_hash),
+                                Err(e) => tracing::warn!("Failed to load storage index {}: {}", storage_hash, e),
+                            }
+                        }
+                    }
+                    if let Some(ops_hash) = json.get("ops_index_hash").and_then(|v| v.as_str()) {
+                        if let Ok(hash) = ops_hash.parse() {
+                            match sync_manager.load_from_storage(hash).await {
+                                Ok(count) => tracing::info!("Loaded {} operations from ops index {}", count, ops_hash),
+                                Err(e) => tracing::warn!("Failed to load ops index {}: {}", ops_hash, e),
+                            }
+                        }
+                    }
+
+                    if let Some(applied_hash) = json.get("applied_index_hash").and_then(|v| v.as_str()) {
+                        if let Ok(hash) = applied_hash.parse() {
+                            match sync_manager.load_applied_index(hash).await {
+                                Ok(_) => tracing::info!("Loaded applied index from {}", applied_hash),
+                                Err(e) => tracing::warn!("Failed to load applied index {}: {}", applied_hash, e),
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("Failed to read sync index hash file: {}", e),
+        }
+    }
+
+    // Background task: persist sync indexes periodically to blob storage
+    let sync_mgr_clone = sync_manager.clone();
+    let index_hash_path_clone = index_hash_path.clone();
+    // Clone the BlobStorage for use inside the background task so we don't move the
+    // original `storage` which is still needed later when constructing other components.
+    let _storage_for_saver = storage.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            match sync_mgr_clone.save_indexes_to_storage().await {
+                Ok((ops_hash, applied_hash)) => {
+                    tracing::info!("Saved sync indexes (ops: {}, applied: {})", ops_hash, applied_hash);
+
+                    let mut json_obj = serde_json::Map::new();
+                    json_obj.insert("ops_index_hash".to_string(), serde_json::Value::String(ops_hash.to_string()));
+                    json_obj.insert("applied_index_hash".to_string(), serde_json::Value::String(applied_hash.to_string()));
+
+                    // Atomic write: write to tmp file then rename
+                    let tmp_path = index_hash_path_clone.with_extension("tmp");
+                    if let Err(e) = tokio::fs::write(&tmp_path, serde_json::to_string(&serde_json::Value::Object(json_obj)).unwrap()).await {
+                        tracing::warn!("Failed to write temp sync index hash file: {}", e);
+                    } else if let Err(e) = tokio::fs::rename(&tmp_path, &index_hash_path_clone).await {
+                        tracing::warn!("Failed to rename temp sync index hash file: {}", e);
+                    }
+                }
+                Err(e) => tracing::warn!("Failed to save sync indexes: {}", e),
+            }
+        }
+    });
 
     // Initialize IrohNetwork using shared Iroh components (single instance)
     let mut network = iroh_network::IrohNetwork::from_components(

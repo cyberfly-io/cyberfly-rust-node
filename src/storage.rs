@@ -4,8 +4,10 @@ use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::Hash;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use moka::sync::Cache as MokaCache;
+use sled::Db as SledDb;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StoreType {
@@ -68,6 +70,15 @@ pub struct SortedSetEntry {
     pub metadata: Option<SignatureMetadata>,
 }
 
+/// Unified stored entry representation for get_all
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredEntry {
+    pub key: String,
+    pub store_type: StoreType,
+    pub value: serde_json::Value,
+    pub metadata: Option<SignatureMetadata>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JsonValue {
     data: serde_json::Value,
@@ -107,60 +118,97 @@ enum StoredValue {
     Geo(GeoValue),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct StorageIndex {
-    mappings: HashMap<String, (String, StoreType)>,
-}
-
 pub struct BlobStorage {
     store: FsStore,
-    index: Arc<RwLock<StorageIndex>>,
-    cache: Arc<RwLock<HashMap<String, StoredValue>>>,
+    sled_db: SledDb,
+    index_tree: sled::Tree,
+    cache: Arc<MokaCache<String, StoredValue>>,
 }
 
 impl Clone for BlobStorage {
     fn clone(&self) -> Self {
         Self {
             store: self.store.clone(),
-            index: Arc::clone(&self.index),
+            sled_db: self.sled_db.clone(),
+            index_tree: self.index_tree.clone(),
             cache: Arc::clone(&self.cache),
         }
     }
 }
 
+// Helper methods for interacting with sled index
 impl BlobStorage {
-    pub async fn new(store: FsStore) -> Result<Self> {
+    fn index_get(&self, key: &str) -> Result<Option<(String, StoreType)>> {
+        if let Ok(Some(v)) = self.index_tree.get(key.as_bytes()) {
+            let tuple: (String, StoreType) = bincode::deserialize(&v)?;
+            Ok(Some(tuple))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn index_exists(&self, key: &str) -> Result<bool> {
+        Ok(self.index_tree.contains_key(key.as_bytes())?)
+    }
+
+    fn index_remove(&self, key: &str) -> Result<()> {
+        self.index_tree.remove(key.as_bytes())?;
+        Ok(())
+    }
+
+    fn index_keys_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        let mut res = Vec::new();
+        let prefix_bytes = prefix.as_bytes();
+        for item in self.index_tree.scan_prefix(prefix_bytes) {
+            let (k, _v) = item?;
+            res.push(String::from_utf8(k.to_vec())?);
+        }
+        Ok(res)
+    }
+}
+
+impl BlobStorage {
+    pub async fn new(store: FsStore, sled_path: Option<PathBuf>) -> Result<Self> {
         tracing::info!("Initializing BlobStorage with FsStore");
+
+        // Determine sled DB path
+        let sled_path = sled_path.unwrap_or_else(|| PathBuf::from("./data/sled_db"));
+        let sled_db = sled::open(&sled_path)?;
+        let index_tree = sled_db.open_tree("storage_index")?;
+
+        // Create a bounded cache with a maximum capacity to avoid unbounded memory growth.
+        let cache = MokaCache::new(10_000); // keep up to 10k entries; tune as needed
 
         let storage = Self {
             store,
-            index: Arc::new(RwLock::new(StorageIndex::default())),
-            cache: Arc::new(RwLock::new(HashMap::new())),
+            sled_db,
+            index_tree,
+            cache: Arc::new(cache),
         };
 
-        if let Err(e) = storage.load_index().await {
-            tracing::warn!(
-                "Could not load existing index: {}. Starting with empty index.",
-                e
-            );
-        }
-
-        tracing::info!("BlobStorage initialized successfully");
+        tracing::info!("BlobStorage initialized successfully with sled index at {:?}", sled_path);
         Ok(storage)
     }
 
     async fn load_index(&self) -> Result<()> {
-        // Try to load index from a known blob hash stored in memory
-        // For now, start with empty index (production would persist this)
+        // Index is persisted in sled and is available on-disk; nothing to load into memory.
         Ok(())
     }
 
+    /// Save the current storage index to blobs and return the blob hash
+    pub async fn save_index_hash(&self) -> Result<Hash> {
+        // Index is persisted in sled; we don't snapshot it to FsStore anymore.
+        Err(anyhow::anyhow!("Storage index is persisted in sled only; no blob snapshot available"))
+    }
+
+    /// Load the storage index from a specific blob hash (restores the in-memory index)
+    pub async fn load_index_from_hash(&self, _hash: Hash) -> Result<()> {
+        // Index is persisted in sled; we don't load a snapshot from FsStore anymore.
+        Err(anyhow::anyhow!("Storage index is persisted in sled only; load from blob is not supported"))
+    }
+
     async fn save_index(&self) -> Result<()> {
-        let index = self.index.read().await;
-        let index_json = serde_json::to_vec(&*index)?;
-        let blobs = self.store.blobs();
-        let _tag = blobs.add_bytes(index_json).await?;
-        tracing::debug!("Index saved with {} entries", index.mappings.len());
+        // Index is persisted in sled; do not snapshot to FsStore to keep index-only in sled.
         Ok(())
     }
 
@@ -176,38 +224,29 @@ impl BlobStorage {
         let hash_str = tag.hash.to_string();
 
         {
-            let mut index = self.index.write().await;
-            index
-                .mappings
-                .insert(key.to_string(), (hash_str, store_type));
+            // Persist index entry into sled as (hash_str, store_type) using bincode
+            let val = bincode::serialize(&(hash_str.clone(), store_type.clone()))?;
+            self.index_tree.insert(key.as_bytes(), val)?;
+            // Flush asynchronously is not necessary on every write; optionally batch.
         }
 
         {
-            let mut cache = self.cache.write().await;
-            cache.insert(key.to_string(), value);
+            self.cache.insert(key.to_string(), value.clone());
         }
 
-        if self.index.read().await.mappings.len() % 10 == 0 {
-            let _ = self.save_index().await;
-        }
+        // Index persisted in sled; no periodic FsStore snapshot is performed here.
 
         Ok(())
     }
 
     async fn get_value(&self, key: &str) -> Result<Option<StoredValue>> {
-        {
-            let cache = self.cache.read().await;
-            if let Some(value) = cache.get(key) {
-                return Ok(Some(value.clone()));
-            }
+        if let Some(value) = self.cache.get(key) {
+            return Ok(Some(value.clone()));
         }
 
-        let (hash_str, _store_type) = {
-            let index = self.index.read().await;
-            match index.mappings.get(key) {
-                Some(entry) => entry.clone(),
-                None => return Ok(None),
-            }
+        let (hash_str, _store_type) = match self.index_get(key)? {
+            Some(tuple) => tuple,
+            None => return Ok(None),
         };
 
         let hash: Hash = hash_str.parse()?;
@@ -215,10 +254,7 @@ impl BlobStorage {
         let value_bytes = blobs.get_bytes(hash).await?.to_vec();
         let value: StoredValue = serde_json::from_slice(&value_bytes)?;
 
-        {
-            let mut cache = self.cache.write().await;
-            cache.insert(key.to_string(), value.clone());
-        }
+    self.cache.insert(key.to_string(), value.clone());
 
         Ok(Some(value))
     }
@@ -606,20 +642,16 @@ impl BlobStorage {
 
     // Key Operations
     pub async fn exists(&self, key: &str) -> Result<bool> {
-        let index = self.index.read().await;
-        Ok(index.mappings.contains_key(key))
+        Ok(self.index_exists(key)?)
     }
 
     pub async fn delete(&self, key: &str) -> Result<()> {
         {
-            let mut index = self.index.write().await;
-            index.mappings.remove(key);
+            self.index_remove(key)?;
         }
 
-        {
-            let mut cache = self.cache.write().await;
-            cache.remove(key);
-        }
+    // Invalidate cache entry in moka cache
+    self.cache.invalidate(key);
 
         self.save_index().await?;
         Ok(())
@@ -661,26 +693,14 @@ impl BlobStorage {
 
     // Delete JSON documents with matching _id
     async fn delete_json_by_id(&self, key_prefix: &str, target_id: &str) -> Result<()> {
-        let index = self.index.read().await;
-        let keys_to_check: Vec<String> = index
-            .mappings
-            .keys()
-            .filter(|k| k.starts_with(key_prefix))
-            .cloned()
-            .collect();
-        drop(index);
+        let keys_to_check = self.index_keys_with_prefix(key_prefix)?;
 
         for key in keys_to_check {
             if let Ok(Some(StoredValue::Json(jv))) = self.get_value(&key).await {
                 if jv.id.as_deref() == Some(target_id) {
                     // Remove from cache and index
-                    let mut cache = self.cache.write().await;
-                    cache.remove(&key);
-                    drop(cache);
-
-                    let mut index = self.index.write().await;
-                    index.mappings.remove(&key);
-                    drop(index);
+                    self.cache.invalidate(&key);
+                    self.index_remove(&key)?;
                 }
             }
         }
@@ -696,7 +716,27 @@ impl BlobStorage {
     }
 
     pub async fn filter_json(&self, key: &str, _json_path: &str) -> Result<Option<String>> {
-        self.get_json(key, None).await
+        // Evaluate JSONPath expression against stored JSON and return matched values
+        let json_opt = self.get_json(key, None).await?;
+        if json_opt.is_none() {
+            return Ok(None);
+        }
+
+        let json_str = json_opt.unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&json_str)?;
+
+        // Use jsonpath_lib to evaluate the expression
+        match jsonpath_lib::select(&doc, _json_path) {
+            Ok(matches) => {
+                // Serialize matched values to JSON array or single value
+                if matches.len() == 1 {
+                    Ok(Some(serde_json::to_string(&matches[0])?))
+                } else {
+                    Ok(Some(serde_json::to_string(&matches)?))
+                }
+            }
+            Err(e) => Err(anyhow::anyhow!("JSONPath error: {}", e)),
+        }
     }
 
     pub async fn json_type(&self, key: &str, _path: Option<&str>) -> Result<Option<String>> {
@@ -1256,37 +1296,243 @@ impl BlobStorage {
 
     // Get all stream keys for a database
     pub async fn get_all_streams(&self, db_prefix: &str) -> Result<Vec<String>> {
-        let index = self.index.read().await;
         let prefix = format!("{}:", db_prefix);
-
-        let stream_keys: Vec<String> = index
-            .mappings
-            .iter()
-            .filter(|(key, (_hash, store_type))| {
-                key.starts_with(&prefix) && matches!(store_type, StoreType::Stream)
-            })
-            .map(|(key, _)| key.clone())
-            .collect();
-
+        let mut stream_keys = Vec::new();
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::Stream) {
+                    stream_keys.push(key);
+                }
+            }
+        }
         Ok(stream_keys)
+    }
+
+    /// Return all JSON documents stored under a database prefix.
+    /// Keys are expected to be namespaced like `db_prefix:...`.
+    pub async fn get_all_json(&self, db_prefix: &str) -> Result<Vec<String>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut docs = Vec::new();
+
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::Json) {
+                    if let Some(json_str) = self.get_json(&key, None).await? {
+                        docs.push(json_str);
+                    }
+                }
+            }
+        }
+
+        Ok(docs)
+    }
+
+    /// Return all JSON documents with optional signature metadata for a database prefix.
+    /// Each item is (key, parsed_json_value, optional SignatureMetadata)
+    pub async fn get_all_json_with_meta(
+        &self,
+        db_prefix: &str,
+    ) -> Result<Vec<(String, serde_json::Value, Option<SignatureMetadata>)>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut res: Vec<(String, serde_json::Value, Option<SignatureMetadata>)> = Vec::new();
+
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::Json) {
+                    if let Ok(Some(stored)) = self.get_value(&key).await {
+                        if let StoredValue::Json(jv) = stored {
+                            res.push((key, jv.data, jv.metadata));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(res)
+    }
+
+    /// Return all string entries for a database prefix (key, value, metadata)
+    pub async fn get_all_strings(
+        &self,
+        db_prefix: &str,
+    ) -> Result<Vec<(String, String, Option<SignatureMetadata>)>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut out = Vec::new();
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::String) {
+                    if let Ok(Some(StoredValue::String(sv))) = self.get_value(&key).await {
+                        out.push((key, sv.value, sv.metadata));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return all hash entries for a database prefix (key, fields, metadata)
+    pub async fn get_all_hashes(
+        &self,
+        db_prefix: &str,
+    ) -> Result<Vec<(String, Vec<(String, String)>, Option<SignatureMetadata>)>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut out = Vec::new();
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::Hash) {
+                    if let Ok(Some(StoredValue::Hash(hv))) = self.get_value(&key).await {
+                        out.push((key, hv.fields.into_iter().collect(), hv.metadata));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return all list entries for a database prefix (key, items, metadata)
+    pub async fn get_all_lists(
+        &self,
+        db_prefix: &str,
+    ) -> Result<Vec<(String, Vec<String>, Option<SignatureMetadata>)>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut out = Vec::new();
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::List) {
+                    if let Ok(Some(StoredValue::List(lv))) = self.get_value(&key).await {
+                        out.push((key, lv.items, lv.metadata));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return all set entries for a database prefix (key, members, metadata)
+    pub async fn get_all_sets(
+        &self,
+        db_prefix: &str,
+    ) -> Result<Vec<(String, Vec<String>, Option<SignatureMetadata>)>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut out = Vec::new();
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::Set) {
+                    if let Ok(Some(StoredValue::Set(sv))) = self.get_value(&key).await {
+                        out.push((key, sv.members.into_iter().collect(), sv.metadata));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return all sorted set entries for a database prefix (key, members with scores, metadata)
+    pub async fn get_all_sorted_sets(
+        &self,
+        db_prefix: &str,
+    ) -> Result<Vec<(String, Vec<(String, f64)>, Option<SignatureMetadata>)>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut out = Vec::new();
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::SortedSet) {
+                    if let Ok(Some(StoredValue::SortedSet(ssv))) = self.get_value(&key).await {
+                        let members: Vec<(String, f64)> = ssv.members.into_iter().collect();
+                        out.push((key, members, ssv.metadata));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Alias for existing get_all_json_with_meta for naming consistency
+    pub async fn get_all_jsons(
+        &self,
+        db_prefix: &str,
+    ) -> Result<Vec<(String, serde_json::Value, Option<SignatureMetadata>)>> {
+        self.get_all_json_with_meta(db_prefix).await
+    }
+
+    /// Return all stream entries (key, entries, metadata)
+    pub async fn get_all_stream_entries(
+        &self,
+        db_prefix: &str,
+    ) -> Result<Vec<(String, Vec<(String, Vec<(String, String)>)>, Option<SignatureMetadata>)>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut out = Vec::new();
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::Stream) {
+                    if let Ok(Some(StoredValue::Stream(sv))) = self.get_value(&key).await {
+                        out.push((key, sv.entries, sv.metadata));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return all timeseries entries (key, points, metadata)
+    pub async fn get_all_timeseries(
+        &self,
+        db_prefix: &str,
+    ) -> Result<Vec<(String, Vec<(i64, f64)>, Option<SignatureMetadata>)>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut out = Vec::new();
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::TimeSeries) {
+                    if let Ok(Some(StoredValue::TimeSeries(tsv))) = self.get_value(&key).await {
+                        let points: Vec<(i64, f64)> = tsv.points.into_iter().collect();
+                        out.push((key, points, tsv.metadata));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return all geo entries (key, list of (member, lon, lat), metadata)
+    pub async fn get_all_geo(
+        &self,
+        db_prefix: &str,
+    ) -> Result<Vec<(String, Vec<(String, f64, f64)>, Option<SignatureMetadata>)>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut out = Vec::new();
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, stype)) = self.index_get(&key)? {
+                if matches!(stype, StoreType::Geo) {
+                    if let Ok(Some(StoredValue::Geo(gv))) = self.get_value(&key).await {
+                        let locations: Vec<(String, f64, f64)> = gv
+                            .locations
+                            .into_iter()
+                            .map(|(m, (lon, lat))| (m, lon, lat))
+                            .collect();
+                        out.push((key, locations, gv.metadata));
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     // Scan keys by pattern (similar to Redis SCAN)
     pub async fn scan_keys(&self, pattern: &str) -> Result<Vec<String>> {
-        let index = self.index.read().await;
-
         // Simple pattern matching: * for wildcard
         let regex_pattern = pattern.replace("*", ".*").replace("?", ".");
 
         let re = regex::Regex::new(&regex_pattern)?;
 
-        let matching_keys: Vec<String> = index
-            .mappings
-            .keys()
-            .filter(|key| re.is_match(key))
-            .cloned()
-            .collect();
-
+        let mut matching_keys = Vec::new();
+        for item in self.index_tree.iter() {
+            let (k, _v) = item?;
+            let key = String::from_utf8(k.to_vec())?;
+            if re.is_match(&key) {
+                matching_keys.push(key);
+            }
+        }
         Ok(matching_keys)
     }
 
@@ -1296,20 +1542,139 @@ impl BlobStorage {
         db_prefix: &str,
         store_type: StoreType,
     ) -> Result<Vec<String>> {
-        let index = self.index.read().await;
         let prefix = format!("{}:", db_prefix);
-
-        let keys: Vec<String> = index
-            .mappings
-            .iter()
-            .filter(|(key, (_hash, stype))| {
-                key.starts_with(&prefix)
-                    && std::mem::discriminant(stype) == std::mem::discriminant(&store_type)
-            })
-            .map(|(key, _)| key.clone())
-            .collect();
-
+        let mut keys = Vec::new();
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, _stype)) = self.index_get(&key)? {
+                if std::mem::discriminant(&_stype) == std::mem::discriminant(&store_type) {
+                    keys.push(key);
+                }
+            }
+        }
         Ok(keys)
+    }
+
+    /// Return all entries across all supported store types for a given DB prefix.
+    /// Each entry is returned as a `StoredEntry` with a JSON-serializable `value` and optional metadata.
+    pub async fn get_all(&self, db_prefix: &str) -> Result<Vec<StoredEntry>> {
+        let prefix = format!("{}:", db_prefix);
+        let mut res: Vec<StoredEntry> = Vec::new();
+
+        for key in self.index_keys_with_prefix(&prefix)? {
+            if let Some((_, _stype)) = self.index_get(&key)? {
+                // Load the stored value and convert to a JSON representation depending on type
+                if let Ok(Some(stored)) = self.get_value(&key).await {
+                    match stored {
+                        StoredValue::String(sv) => {
+                            res.push(StoredEntry {
+                                key: key.clone(),
+                                store_type: StoreType::String,
+                                value: serde_json::json!({"value": sv.value}),
+                                metadata: sv.metadata,
+                            });
+                        }
+                        StoredValue::Hash(hv) => {
+                            res.push(StoredEntry {
+                                key: key.clone(),
+                                store_type: StoreType::Hash,
+                                value: serde_json::to_value(hv.fields)?,
+                                metadata: hv.metadata,
+                            });
+                        }
+                        StoredValue::List(lv) => {
+                            res.push(StoredEntry {
+                                key: key.clone(),
+                                store_type: StoreType::List,
+                                value: serde_json::to_value(lv.items)?,
+                                metadata: lv.metadata,
+                            });
+                        }
+                        StoredValue::Set(sv) => {
+                            // Serialize set members as array
+                            let members: Vec<String> = sv.members.into_iter().collect();
+                            res.push(StoredEntry {
+                                key: key.clone(),
+                                store_type: StoreType::Set,
+                                value: serde_json::to_value(members)?,
+                                metadata: sv.metadata,
+                            });
+                        }
+                        StoredValue::SortedSet(ssv) => {
+                            // Convert to array of {score, data}
+                            let mut arr: Vec<serde_json::Value> = Vec::new();
+                            for (member, score) in ssv.members.into_iter() {
+                                // try parse member as json, fallback to string
+                                let data = serde_json::from_str::<serde_json::Value>(&member)
+                                    .unwrap_or(serde_json::Value::String(member));
+                                arr.push(serde_json::json!({"score": score, "data": data}));
+                            }
+                            res.push(StoredEntry {
+                                key: key.clone(),
+                                store_type: StoreType::SortedSet,
+                                value: serde_json::Value::Array(arr),
+                                metadata: ssv.metadata,
+                            });
+                        }
+                        StoredValue::Json(jv) => {
+                            res.push(StoredEntry {
+                                key: key.clone(),
+                                store_type: StoreType::Json,
+                                value: jv.data,
+                                metadata: jv.metadata,
+                            });
+                        }
+                        StoredValue::Stream(sv) => {
+                            // entries: Vec<(String, Vec<(String, String)>)>
+                            let entries: Vec<serde_json::Value> = sv
+                                .entries
+                                .into_iter()
+                                .map(|(id, fields)| {
+                                    let map: serde_json::Map<String, serde_json::Value> = fields
+                                        .into_iter()
+                                        .map(|(k, v)| (k, serde_json::Value::String(v)))
+                                        .collect();
+                                    serde_json::json!({"id": id, "fields": serde_json::Value::Object(map)})
+                                })
+                                .collect();
+                            res.push(StoredEntry {
+                                key: key.clone(),
+                                store_type: StoreType::Stream,
+                                value: serde_json::Value::Array(entries),
+                                metadata: sv.metadata,
+                            });
+                        }
+                        StoredValue::TimeSeries(tsv) => {
+                            let points: Vec<serde_json::Value> = tsv
+                                .points
+                                .into_iter()
+                                .map(|(ts, val)| serde_json::json!({"timestamp": ts, "value": val}))
+                                .collect();
+                            res.push(StoredEntry {
+                                key: key.clone(),
+                                store_type: StoreType::TimeSeries,
+                                value: serde_json::Value::Array(points),
+                                metadata: tsv.metadata,
+                            });
+                        }
+                        StoredValue::Geo(gv) => {
+                            let locations: Vec<serde_json::Value> = gv
+                                .locations
+                                .into_iter()
+                                .map(|(member, (lon, lat))| serde_json::json!({"member": member, "lon": lon, "lat": lat}))
+                                .collect();
+                            res.push(StoredEntry {
+                                key: key.clone(),
+                                store_type: StoreType::Geo,
+                                value: serde_json::Value::Array(locations),
+                                metadata: gv.metadata,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(res)
     }
 }
 

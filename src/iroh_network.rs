@@ -7,8 +7,7 @@ use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_gossip::{
     net::Gossip, 
     proto::TopicId,
-    api::{Event as GossipEvent, GossipSender}, 
-    ALPN as GOSSIP_ALPN
+    api::{Event as GossipEvent, GossipSender},
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -288,7 +287,7 @@ impl IrohNetwork {
                 });
                 
                 if let Ok(beacon_bytes) = serde_json::to_vec(&beacon) {
-                    let mut sender = discovery_beacon_sender.lock().await;
+                    let sender = discovery_beacon_sender.lock().await;
                     if let Err(e) = sender.broadcast(beacon_bytes.into()).await {
                         tracing::debug!("Discovery beacon broadcast error: {}", e);
                     } else {
@@ -667,7 +666,7 @@ impl IrohNetwork {
     pub async fn event_receiver(&self) -> mpsc::UnboundedReceiver<NetworkEvent> {
         // This is a bit hacky but needed for API compatibility
         // In production, consider refactoring to use a broadcast channel
-        let (tx, rx) = mpsc::unbounded_channel();
+    let (_tx, rx) = mpsc::unbounded_channel();
         // TODO: Forward events from self.event_rx to this new channel
         rx
     }
@@ -740,4 +739,5 @@ pub struct NetworkStats {
 }
 
 // Re-export types for compatibility
-pub use iroh::NodeId as PeerId;
+// Re-export for compatibility when needed. Keep commented to avoid unused import warnings.
+// pub use iroh::NodeId as PeerId;

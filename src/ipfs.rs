@@ -93,9 +93,9 @@ impl IpfsStorage {
             .unwrap_or("unknown")
             .to_string();
 
-        // Add file content to Iroh blob store
-        let blobs = self.store.blobs();
-        let content_tag = blobs.add_bytes(content.clone()).await?;
+            // Add file content to Iroh blob store
+            let blobs = self.store.blobs();
+            let content_tag = blobs.add_bytes(content.clone()).await?;
         let content_hash_str = content_tag.hash.to_string();
 
         tracing::info!("File content added with hash: {}", content_hash_str);
@@ -119,7 +119,7 @@ impl IpfsStorage {
 
         // Store metadata as JSON in Iroh
         let metadata_json = serde_json::to_vec(&metadata)?;
-        let metadata_tag = blobs.add_bytes(metadata_json).await?;
+    let metadata_tag = blobs.add_bytes(metadata_json).await?;
         let metadata_hash_str = metadata_tag.hash.to_string();
 
         tracing::info!(
@@ -441,8 +441,8 @@ impl IpfsStorage {
     pub async fn list_blobs(&self) -> Result<Vec<String>> {
         tracing::info!("Listing all blobs");
 
-        // Get all blob hashes from the store
-        let blobs = self.store.blobs();
+    // Get all blob hashes from the store
+    let _blobs = self.store.blobs();
         // TODO: Implement blob listing if needed
         // For now return empty list
         Ok(Vec::new())

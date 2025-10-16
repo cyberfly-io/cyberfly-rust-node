@@ -87,6 +87,89 @@ pub struct IotPublishResult {
 }
 
 #[derive(SimpleObject, Clone)]
+pub struct JsonWithMeta {
+    pub key: String,
+    pub data: async_graphql::Json<serde_json::Value>,
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
+    pub timestamp: Option<i64>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct StoredEntryGql {
+    pub key: String,
+    pub store_type: String,
+    pub value: async_graphql::Json<serde_json::Value>,
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
+}
+
+// Per-type GraphQL response types
+#[derive(SimpleObject, Clone)]
+pub struct StringEntryGql {
+    pub key: String,
+    pub value: String,
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct HashEntryGql {
+    pub key: String,
+    pub fields: async_graphql::Json<serde_json::Value>,
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct ListEntryGql {
+    pub key: String,
+    pub items: async_graphql::Json<serde_json::Value>,
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct SetEntryGql {
+    pub key: String,
+    pub members: async_graphql::Json<serde_json::Value>,
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct SortedSetEntryGql {
+    pub key: String,
+    pub members: async_graphql::Json<serde_json::Value>, // array of {member, score}
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct StreamEntryGql {
+    pub key: String,
+    pub entries: async_graphql::Json<serde_json::Value>,
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct TimeSeriesEntryGql {
+    pub key: String,
+    pub points: async_graphql::Json<serde_json::Value>,
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct GeoEntryGql {
+    pub key: String,
+    pub locations: async_graphql::Json<serde_json::Value>,
+    pub public_key: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
 pub struct BlobOperation {
     pub op_id: String,
     pub timestamp: String,
@@ -190,6 +273,192 @@ impl QueryRoot {
             key: full_key,
             value,
         })
+    }
+
+    /// Get all string entries for a database
+    async fn get_all_strings(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<StringEntryGql>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
+        let items = storage.get_all_strings(&db_name).await.map_err(DbError::from)?;
+        Ok(items
+            .into_iter()
+            .map(|(k, v, meta)| StringEntryGql {
+                key: k,
+                value: v,
+                public_key: meta.clone().map(|m| m.public_key),
+                signature: meta.map(|m| m.signature),
+            })
+            .collect())
+    }
+
+    /// Get all hashes for a database
+    async fn get_all_hashes(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<HashEntryGql>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
+        let items = storage.get_all_hashes(&db_name).await.map_err(DbError::from)?;
+        Ok(items
+            .into_iter()
+            .map(|(k, fields, meta)| HashEntryGql {
+                key: k,
+                fields: async_graphql::Json(serde_json::to_value(fields).unwrap_or(serde_json::Value::Null)),
+                public_key: meta.clone().map(|m| m.public_key),
+                signature: meta.map(|m| m.signature),
+            })
+            .collect())
+    }
+
+    /// Get all lists for a database
+    async fn get_all_lists(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<ListEntryGql>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
+        let items = storage.get_all_lists(&db_name).await.map_err(DbError::from)?;
+        Ok(items
+            .into_iter()
+            .map(|(k, items_vec, meta)| ListEntryGql {
+                key: k,
+                items: async_graphql::Json(serde_json::to_value(items_vec).unwrap_or(serde_json::Value::Null)),
+                public_key: meta.clone().map(|m| m.public_key),
+                signature: meta.map(|m| m.signature),
+            })
+            .collect())
+    }
+
+    /// Get all sets for a database
+    async fn get_all_sets(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<SetEntryGql>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
+        let items = storage.get_all_sets(&db_name).await.map_err(DbError::from)?;
+        Ok(items
+            .into_iter()
+            .map(|(k, members, meta)| SetEntryGql {
+                key: k,
+                members: async_graphql::Json(serde_json::to_value(members).unwrap_or(serde_json::Value::Null)),
+                public_key: meta.clone().map(|m| m.public_key),
+                signature: meta.map(|m| m.signature),
+            })
+            .collect())
+    }
+
+    /// Get all sorted sets for a database
+    async fn get_all_sorted_sets(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<SortedSetEntryGql>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
+        let items = storage.get_all_sorted_sets(&db_name).await.map_err(DbError::from)?;
+        Ok(items
+            .into_iter()
+            .map(|(k, members, meta)| SortedSetEntryGql {
+                key: k,
+                members: async_graphql::Json(serde_json::to_value(members).unwrap_or(serde_json::Value::Null)),
+                public_key: meta.clone().map(|m| m.public_key),
+                signature: meta.map(|m| m.signature),
+            })
+            .collect())
+    }
+
+    /// Get all JSON docs for a database (alias uses existing get_all_json)
+    async fn get_all_jsons(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<JsonWithMeta>, DbError> {
+        // Reuse existing resolver implementation
+        self.get_all_json(ctx, db_name).await
+    }
+
+    /// Get all stream entries for a database
+    async fn get_all_streams(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<StreamEntryGql>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
+        let items = storage.get_all_stream_entries(&db_name).await.map_err(DbError::from)?;
+        Ok(items
+            .into_iter()
+            .map(|(k, entries, meta)| StreamEntryGql {
+                key: k,
+                entries: async_graphql::Json(serde_json::to_value(entries).unwrap_or(serde_json::Value::Null)),
+                public_key: meta.clone().map(|m| m.public_key),
+                signature: meta.map(|m| m.signature),
+            })
+            .collect())
+    }
+
+    /// Get all timeseries for a database
+    async fn get_all_timeseries(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<TimeSeriesEntryGql>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
+        let items = storage.get_all_timeseries(&db_name).await.map_err(DbError::from)?;
+        Ok(items
+            .into_iter()
+            .map(|(k, points, meta)| TimeSeriesEntryGql {
+                key: k,
+                points: async_graphql::Json(serde_json::to_value(points).unwrap_or(serde_json::Value::Null)),
+                public_key: meta.clone().map(|m| m.public_key),
+                signature: meta.map(|m| m.signature),
+            })
+            .collect())
+    }
+
+    /// Get all geo entries for a database
+    async fn get_all_geo(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<GeoEntryGql>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
+        let items = storage.get_all_geo(&db_name).await.map_err(DbError::from)?;
+        Ok(items
+            .into_iter()
+            .map(|(k, locs, meta)| GeoEntryGql {
+                key: k,
+                locations: async_graphql::Json(serde_json::to_value(locs).unwrap_or(serde_json::Value::Null)),
+                public_key: meta.clone().map(|m| m.public_key),
+                signature: meta.map(|m| m.signature),
+            })
+            .collect())
     }
 
     /// Get a hash field from storage
@@ -384,6 +653,65 @@ impl QueryRoot {
             key: full_key,
             value,
         })
+    }
+
+    /// Get all JSON documents for a database prefix (with signature metadata)
+    async fn get_all_json(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<JsonWithMeta>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
+        let items = storage
+            .get_all_json_with_meta(&db_name)
+            .await
+            .map_err(DbError::from)?;
+
+        let mut out = Vec::new();
+        for (key, data, meta) in items {
+            let (pk, sig, ts) = match meta {
+                Some(m) => (Some(m.public_key), Some(m.signature), Some(m.timestamp)),
+                None => (None, None, None),
+            };
+            out.push(JsonWithMeta {
+                key,
+                data: async_graphql::Json(data),
+                public_key: pk,
+                signature: sig,
+                timestamp: ts,
+            });
+        }
+
+        Ok(out)
+    }
+
+    /// Get all entries across all store types for a database prefix
+    async fn get_all(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+    ) -> Result<Vec<StoredEntryGql>, DbError> {
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+
+        let items = storage.get_all(&db_name).await.map_err(DbError::from)?;
+
+        let out: Vec<StoredEntryGql> = items
+            .into_iter()
+            .map(|entry| StoredEntryGql {
+                key: entry.key,
+                store_type: format!("{:?}", entry.store_type),
+                value: async_graphql::Json(entry.value),
+                public_key: entry.metadata.clone().map(|m| m.public_key),
+                signature: entry.metadata.map(|m| m.signature),
+            })
+            .collect();
+
+        Ok(out)
     }
 
     // ============ Stream Queries ============
@@ -1059,6 +1387,18 @@ impl MutationRoot {
         // Create full key with database namespace
         let full_key = format!("{}:{}", input.db_name, input.key);
 
+        // Create signature metadata to store alongside values when possible
+        let metadata_ts: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let sig_meta = Some(crate::storage::SignatureMetadata {
+            public_key: input.public_key.clone(),
+            signature: input.signature.clone(),
+            timestamp: metadata_ts,
+        });
+
         // Clone fields we'll need later for SignedOperation (before they're moved)
         let field_clone = input.field.clone();
         let score_clone = input.score;
@@ -1072,7 +1412,7 @@ impl MutationRoot {
         match input.store_type.to_lowercase().as_str() {
             "string" => {
                 storage
-                    .set_string(&full_key, &input.value)
+                    .set_string_with_metadata(&full_key, &input.value, sig_meta.clone())
                     .await
                     .map_err(DbError::from)?;
             }
@@ -1081,19 +1421,19 @@ impl MutationRoot {
                     DbError::InvalidData("Field required for Hash type".to_string())
                 })?;
                 storage
-                    .set_hash(&full_key, &field, &input.value)
+                    .set_hash_with_metadata(&full_key, &field, &input.value, sig_meta.clone())
                     .await
                     .map_err(DbError::from)?;
             }
             "list" => {
                 storage
-                    .push_list(&full_key, &input.value)
+                    .push_list_with_metadata(&full_key, &input.value, sig_meta.clone())
                     .await
                     .map_err(DbError::from)?;
             }
             "set" => {
                 storage
-                    .add_set(&full_key, &input.value)
+                    .add_set_with_metadata(&full_key, &input.value, sig_meta.clone())
                     .await
                     .map_err(DbError::from)?;
             }
@@ -1102,14 +1442,14 @@ impl MutationRoot {
                     DbError::InvalidData("Score required for SortedSet type".to_string())
                 })?;
                 storage
-                    .add_sorted_set(&full_key, score, &input.value)
+                    .add_sorted_set_with_metadata(&full_key, score, &input.value, sig_meta.clone())
                     .await
                     .map_err(DbError::from)?;
             }
             "json" => {
                 let path = input.json_path.as_deref().unwrap_or("$");
                 storage
-                    .set_json(&full_key, path, &input.value)
+                    .set_json_with_metadata(&full_key, path, &input.value, sig_meta.clone())
                     .await
                     .map_err(DbError::from)?;
             }
@@ -1123,7 +1463,6 @@ impl MutationRoot {
                         DbError::InvalidData(format!("Invalid stream_fields JSON: {}", e))
                     })?;
 
-                let mut field_pairs: Vec<(&str, &str)> = Vec::new();
                 let mut owned_fields: Vec<(String, String)> = Vec::new();
 
                 for field_obj in fields {
@@ -1141,7 +1480,7 @@ impl MutationRoot {
                 }
 
                 storage
-                    .xadd(&full_key, "*", &field_pairs)
+                    .xadd_with_metadata(&full_key, "*", &owned_fields, sig_meta.clone())
                     .await
                     .map_err(DbError::from)?;
             }
@@ -1157,7 +1496,7 @@ impl MutationRoot {
                 })?;
 
                 storage
-                    .ts_add(&full_key, timestamp, value)
+                    .ts_add_with_metadata(&full_key, timestamp, value, sig_meta.clone())
                     .await
                     .map_err(DbError::from)?;
             }
@@ -1170,7 +1509,7 @@ impl MutationRoot {
                 })?;
 
                 storage
-                    .geoadd(&full_key, longitude, latitude, &input.value)
+                    .geoadd_with_metadata(&full_key, longitude, latitude, &input.value, sig_meta.clone())
                     .await
                     .map_err(DbError::from)?;
             }

@@ -262,6 +262,37 @@ impl SyncStore {
         }
     }
 
+    /// Persist the applied_ops set to blobs and return its hash
+    pub async fn save_applied_index(&self) -> Result<Hash> {
+        if let Some(ref store) = self.store {
+            let applied = self.applied_ops.read().await;
+            let json = serde_json::to_vec(&*applied)?;
+            let blobs = store.blobs();
+            let tag = blobs.add_bytes(json).await?;
+            let hash = tag.hash;
+
+            tracing::info!("Saved applied_ops index with {} entries to blob {}", applied.len(), hash);
+
+            Ok(hash)
+        } else {
+            Err(anyhow!("Blob store not available"))
+        }
+    }
+
+    /// Load applied_ops set from a blob hash
+    pub async fn load_applied_index(&self, hash: Hash) -> Result<()> {
+        if let Some(ref store) = self.store {
+            let blobs = store.blobs();
+            let bytes = blobs.get_bytes(hash).await?.to_vec();
+            let set: HashSet<String> = serde_json::from_slice(&bytes)?;
+            *self.applied_ops.write().await = set;
+            tracing::info!("Loaded applied_ops index with {} entries from blob {}", self.applied_ops.read().await.len(), hash);
+            Ok(())
+        } else {
+            Err(anyhow!("Blob store not available"))
+        }
+    }
+
     /// Load the operation index from blobs (called on startup)
     pub async fn load_index(&self, hash: Hash) -> Result<()> {
         if let Some(ref store) = self.store {
@@ -430,6 +461,16 @@ pub struct SyncManager {
     local_node_id: NodeId,
 }
 
+impl Clone for SyncManager {
+    fn clone(&self) -> Self {
+        Self {
+            sync_store: Arc::clone(&self.sync_store),
+            storage: self.storage.clone(),
+            local_node_id: self.local_node_id.clone(),
+        }
+    }
+}
+
 impl SyncManager {
     pub fn new(storage: RedisStorage, local_node_id: NodeId) -> Self {
         Self {
@@ -469,6 +510,38 @@ impl SyncManager {
         let hash = self.sync_store.save_index().await?;
         tracing::info!("Saved operation index to blob: {}", hash);
         Ok(hash)
+    }
+
+    /// Save both operation index and applied index to blobs and return (ops_hash, applied_hash)
+    pub async fn save_indexes_to_storage(&self) -> Result<(Hash, Hash)> {
+        let ops_hash = self.sync_store.save_index().await?;
+        let applied_hash = self.sync_store.save_applied_index().await?;
+        Ok((ops_hash, applied_hash))
+    }
+
+    /// Save operation index, applied index, and the storage index (via provided BlobStorage).
+    /// Returns (ops_hash, applied_hash, Option<storage_index_hash>) where storage hash may be None
+    /// if saving the storage index fails.
+    pub async fn save_indexes_to_storage_with_blobstore(
+        &self,
+        blob_storage: &crate::storage::BlobStorage,
+    ) -> Result<(Hash, Hash, Option<Hash>)> {
+        let ops_hash = self.sync_store.save_index().await?;
+        let applied_hash = self.sync_store.save_applied_index().await?;
+
+        // Attempt to save storage index; on failure, log and continue
+        match blob_storage.save_index_hash().await {
+            Ok(h) => Ok((ops_hash, applied_hash, Some(h))),
+            Err(e) => {
+                tracing::warn!("Failed to save storage index from SyncManager: {}", e);
+                Ok((ops_hash, applied_hash, None))
+            }
+        }
+    }
+
+    /// Load applied index from blob
+    pub async fn load_applied_index(&self, hash: Hash) -> Result<()> {
+        self.sync_store.load_applied_index(hash).await
     }
 
     /// Get sync store reference
@@ -626,7 +699,14 @@ impl SyncManager {
         }
         // Mark as applied so we don't re-apply on duplicate sync messages
         self.sync_store.mark_applied(&op.op_id).await;
-
+        // Persist applied_ops set so restarts won't re-apply already-applied operations.
+        // This is best-effort: log failures but don't fail the whole apply.
+        if let Some(ref store) = self.sync_store.store {
+            match self.sync_store.save_applied_index().await {
+                Ok(h) => tracing::debug!(applied_index_blob = %h, "Persisted applied_ops index"),
+                Err(e) => tracing::warn!(error = %e, "Failed to persist applied_ops index"),
+            }
+        }
         Ok(())
     }
 
