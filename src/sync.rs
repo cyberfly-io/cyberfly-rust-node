@@ -729,6 +729,7 @@ impl SyncManager {
                 Err(e) => tracing::warn!(error = %e, "Failed to persist applied_ops index"),
             }
         }
+        tracing::info!(op_id = %op.op_id, key = %full_key, "Applied operation to storage and marked as applied");
         Ok(())
     }
 

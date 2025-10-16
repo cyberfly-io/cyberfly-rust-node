@@ -233,6 +233,8 @@ impl BlobStorage {
         {
             self.cache.insert(key.to_string(), value.clone());
         }
+        tracing::info!(key = %key, blob = %hash_str, "Stored key in blob and updated index");
+
 
         // Index persisted in sled; no periodic FsStore snapshot is performed here.
 
