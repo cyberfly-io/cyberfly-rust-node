@@ -9,6 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+// Chunk size for sync responses to avoid oversized payloads
+const MAX_OPS_PER_RESPONSE: usize = 128;
+
 use crate::crypto;
 use crate::storage::RedisStorage;
 
@@ -23,6 +26,7 @@ pub enum SyncMessage {
     },
     /// Response with data operations
     SyncResponse {
+        requester: String,            // Original requester EndpointId
         operations: Vec<SignedOperation>,
         has_more: bool,
         continuation_token: Option<String>,
@@ -433,6 +437,12 @@ impl SyncStore {
         self.operations.read().await.len()
     }
 
+    /// Get the latest applied timestamp across tracked operations (LWW values)
+    pub async fn last_applied_timestamp(&self) -> Option<i64> {
+        let ops = self.operations.read().await;
+        ops.values().map(|(ts, _)| *ts).max()
+    }
+
     /// Merge operations from another node
     pub async fn merge_operations(&self, operations: Vec<SignedOperation>) -> Result<usize> {
         let mut merged_count = 0;
@@ -565,67 +575,87 @@ impl SyncManager {
         &self,
         msg: SyncMessage,
         from_peer: EndpointId,
-    ) -> Result<Option<SyncMessage>> {
+    ) -> anyhow::Result<Option<SyncMessage>> {
         match msg {
-            SyncMessage::SyncRequest {
-                requester,
-                since_timestamp,
-            } => {
+            SyncMessage::SyncRequest { requester, since_timestamp } => {
                 tracing::info!(
                     "Received sync request from {} (since: {:?})",
                     requester,
                     since_timestamp
                 );
 
-                // Get operations to send
-                let operations = if let Some(ts) = since_timestamp {
+                // Fetch and sort operations by timestamp asc, then op_id asc for determinism
+                let mut operations = if let Some(ts) = since_timestamp {
                     self.sync_store.get_operations_since(ts).await
                 } else {
                     self.sync_store.get_all_operations().await
                 };
+                operations.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.op_id.cmp(&b.op_id)));
 
-                tracing::info!("Sending {} operations to {}", operations.len(), requester);
+                // Chunk the operations to avoid large payloads
+                let total = operations.len();
+                let chunk: Vec<SignedOperation> = operations.into_iter().take(MAX_OPS_PER_RESPONSE).collect();
+                let has_more = total > chunk.len();
+                let continuation_token = if has_more {
+                    // Use last timestamp from this chunk as simple continuation cursor
+                    let next_ts = chunk.last().map(|op| op.timestamp).unwrap_or(0);
+                    Some(format!("ts:{}", next_ts))
+                } else {
+                    None
+                };
+
+                tracing::info!("Sending {} ops (has_more: {}) to {}", chunk.len(), has_more, requester);
 
                 Ok(Some(SyncMessage::SyncResponse {
-                    operations,
-                    has_more: false,
-                    continuation_token: None,
+                    requester,
+                    operations: chunk,
+                    has_more,
+                    continuation_token,
                 }))
             }
+            SyncMessage::SyncResponse { requester, operations, has_more, continuation_token } => {
+                // Only process responses intended for this node
+                let local_id = self.local_node_id.to_string();
+                if requester != local_id {
+                    tracing::debug!("Ignoring SyncResponse intended for {}", requester);
+                    return Ok(None);
+                }
 
-            SyncMessage::SyncResponse {
-                operations,
-                has_more,
-                continuation_token,
-            } => {
                 tracing::info!(
                     "Received sync response with {} operations from {}",
                     operations.len(),
                     from_peer
                 );
 
-                // Merge operations
+                // Merge and apply
                 let merged = self.sync_store.merge_operations(operations).await?;
                 tracing::info!("Merged {} new operations", merged);
-
-                // Apply operations to storage
                 self.apply_operations_to_storage().await?;
 
-                // If there's more data, request it
+                // If more data is available, immediately request the next chunk using continuation
                 if has_more {
                     if let Some(token) = continuation_token {
-                        tracing::info!("Requesting more data with token: {}", token);
-                        // TODO: Implement continuation
+                        // Parse simple token format ts:<i64>
+                        if let Some(ts_str) = token.strip_prefix("ts:") {
+                            if let Ok(ts) = ts_str.parse::<i64>() {
+                                tracing::info!("Requesting next sync chunk since ts {}", ts);
+                                return Ok(Some(SyncMessage::SyncRequest {
+                                    requester: local_id,
+                                    since_timestamp: Some(ts),
+                                }));
+                            } else {
+                                tracing::warn!("Failed to parse continuation token: {}", token);
+                            }
+                        } else {
+                            tracing::warn!("Unknown continuation token format: {}", token);
+                        }
                     }
                 }
 
                 Ok(None)
             }
-
             SyncMessage::Operation { operation } => {
                 tracing::info!("Received operation {} from {}", operation.op_id, from_peer);
-
-                // Add operation to sync store (will verify signature)
                 match self.sync_store.add_operation(operation.clone()).await {
                     Ok(true) => {
                         tracing::info!(op_id = %operation.op_id, "Operation accepted into SyncStore, applying to storage");
@@ -640,7 +670,6 @@ impl SyncManager {
                         tracing::warn!(op_id = %operation.op_id, "Failed to add operation to SyncStore: {}", e);
                     }
                 }
-
                 Ok(None)
             }
         }

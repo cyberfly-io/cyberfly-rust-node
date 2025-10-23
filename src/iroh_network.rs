@@ -368,21 +368,42 @@ impl IrohNetwork {
                             }
                         }
                         NetworkEvent::PeerDiscovered { peer } => {
-                            // Initiate bootstrap full sync with newly discovered peer
+                            // Initiate sync with newly discovered peer
                             if let Some(manager) = sync_manager.as_ref() {
-                                match manager.request_full_sync(peer).await {
-                                    Ok(request) => {
-                                        if let Some(sender) = &sync_sender {
-                                            if let Ok(payload) = serde_json::to_vec(&request) {
-                                                if let Err(e) = sender.lock().await.broadcast(payload.into()).await {
-                                                    tracing::error!("Failed to broadcast sync request to {}: {}", peer, e);
-                                                } else {
-                                                    tracing::info!("Initiated bootstrap sync with {}", peer);
+                                let op_count = manager.sync_store().operation_count().await;
+                                if op_count == 0 {
+                                    tracing::info!("Initiated peer discovery with {}; requesting full sync (empty local store)", peer);
+                                    match manager.request_full_sync(peer).await {
+                                        Ok(request) => {
+                                            if let Some(sender) = &sync_sender {
+                                                if let Ok(payload) = serde_json::to_vec(&request) {
+                                                    if let Err(e) = sender.lock().await.broadcast(payload.into()).await {
+                                                        tracing::error!("Failed to broadcast full sync request to {}: {}", peer, e);
+                                                    } else {
+                                                        tracing::info!("Initiated bootstrap full sync with {}", peer);
+                                                    }
                                                 }
                                             }
                                         }
+                                        Err(e) => tracing::error!("Failed to create full sync request: {}", e),
                                     }
-                                    Err(e) => tracing::error!("Failed to create sync request: {}", e),
+                                } else {
+                                    let since_ts = manager.sync_store().last_applied_timestamp().await.unwrap_or(0);
+                                    tracing::info!("Peer discovered {}; requesting incremental sync since {} ({} local ops)", peer, since_ts, op_count);
+                                    match manager.request_incremental_sync(peer, since_ts).await {
+                                        Ok(request) => {
+                                            if let Some(sender) = &sync_sender {
+                                                if let Ok(payload) = serde_json::to_vec(&request) {
+                                                    if let Err(e) = sender.lock().await.broadcast(payload.into()).await {
+                                                        tracing::error!("Failed to broadcast incremental sync request to {}: {}", peer, e);
+                                                    } else {
+                                                        tracing::info!("Initiated incremental sync with {} since {}", peer, since_ts);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(e) => tracing::error!("Failed to create incremental sync request: {}", e),
+                                    }
                                 }
                             }
                         }
