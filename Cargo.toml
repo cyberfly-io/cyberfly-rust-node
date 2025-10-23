@@ -26,11 +26,11 @@ signature = "2.2"
 automerge = "0.6"
 
 # IPFS - Using Iroh (modern Rust IPFS implementation)
-# Upgrade to 0.94 for latest breaking changes
+# Using compatible versions to avoid dependency conflicts
 iroh = { version = "0.94.0", features = ["discovery-local-network", "discovery-pkarr-dht"] }
 iroh-blobs = "0.96.0"
 iroh-gossip = "0.94.0"
-iroh-docs = "0.94.0"
+# iroh-docs = "0.94.0"  # Temporarily disabled due to redb version conflict
 dashmap = "6.0"
 
 # MQTT
@@ -69,3 +69,18 @@ jsonpath_lib = "0.3"
 moka = "0.10"
 
 [dev-dependencies]
+# Testing framework
+tokio-test = "0.4"
+tempfile = "3.8"
+mockall = "0.12"
+serial_test = "3.0"
+
+# Property-based testing
+proptest = "1.4"
+
+# HTTP testing for GraphQL
+reqwest = { version = "0.11", features = ["json"] }
+
+# Additional testing utilities
+assert_matches = "1.5"
+pretty_assertions = "1.4"

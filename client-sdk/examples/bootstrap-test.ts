@@ -23,7 +23,7 @@ async function testBootstrapNode() {
             }
         `;
         
-        const nodeInfoResponse = await graphqlClient.request(nodeInfoQuery);
+        const nodeInfoResponse = await graphqlClient.request(nodeInfoQuery) as any;
         const nodeInfo = nodeInfoResponse.getNodeInfo;
         console.log(`Node ID: ${nodeInfo.nodeId}`);
         console.log(`Health: ${nodeInfo.health}`);
@@ -47,12 +47,12 @@ async function testBootstrapNode() {
             }
         `;
         
-        const blobOpsResponse = await graphqlClient.request(blobOpsQuery);
+        const blobOpsResponse = await graphqlClient.request(blobOpsQuery) as any;
         const operations = blobOpsResponse.getAllBlobOperations;
         console.log(`Found ${operations.length} operations:`);
         
         if (operations.length > 0) {
-            operations.forEach((op, index) => {
+            operations.forEach((op: any, index: number) => {
                 const timestamp = new Date(parseInt(op.timestamp));
                 console.log(`  ${index + 1}. ${op.key} (${op.storeType}) - ${timestamp.toLocaleString()}`);
                 console.log(`      Value: ${op.value.substring(0, 50)}${op.value.length > 50 ? '...' : ''}`);
@@ -71,7 +71,7 @@ async function testBootstrapNode() {
                     }
                 `;
                 
-                const stringResponse = await graphqlClient.request(stringQuery);
+                const stringResponse = await graphqlClient.request(stringQuery) as any;
                 console.log(`✅ Retrieved: ${stringResponse.getString.value}`);
             }
         } else {
@@ -80,10 +80,9 @@ async function testBootstrapNode() {
         
         console.log('\n✅ Bootstrap node test completed successfully!');
         
-    } catch (error) {
-        console.error('❌ Error testing bootstrap node:', error);
-        
-        if (error.message.includes('fetch')) {
+    } catch (error: any) {
+        console.error('❌ Error connecting to bootstrap node:', error);
+        if (error.message && error.message.includes('fetch')) {
             console.log('\n💡 Network connectivity issue detected');
             console.log('   - Check if bootstrap node is accessible');
             console.log('   - Verify firewall settings');

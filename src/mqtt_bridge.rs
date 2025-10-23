@@ -340,8 +340,8 @@ impl MqttBridge {
         // changing the bridge's sender (which should continue to be used by
         // the bridge to send messages).
         let (_dummy_tx, dummy_rx) = mpsc::unbounded_channel();
-        let old_rx = std::mem::replace(&mut self.mqtt_to_gossip_rx, dummy_rx);
-        old_rx
+        
+        std::mem::replace(&mut self.mqtt_to_gossip_rx, dummy_rx)
     }
 }
 

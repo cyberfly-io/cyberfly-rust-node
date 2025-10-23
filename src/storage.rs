@@ -644,7 +644,7 @@ impl BlobStorage {
 
     // Key Operations
     pub async fn exists(&self, key: &str) -> Result<bool> {
-        Ok(self.index_exists(key)?)
+        self.index_exists(key)
     }
 
     pub async fn delete(&self, key: &str) -> Result<()> {
@@ -985,8 +985,8 @@ impl BlobStorage {
                     .points
                     .range(from_timestamp..=to_timestamp)
                     .filter(|(_, val)| {
-                        let above_min = min_value.map_or(true, |min| **val >= min);
-                        let below_max = max_value.map_or(true, |max| **val <= max);
+                        let above_min = min_value.is_none_or(|min| **val >= min);
+                        let below_max = max_value.is_none_or(|max| **val <= max);
                         above_min && below_max
                     })
                     .map(|(ts, val)| (*ts, *val))

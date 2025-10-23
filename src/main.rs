@@ -7,6 +7,7 @@ mod graphql;
 mod ipfs;
 mod iroh_network; // Iroh-based networking
 mod mqtt_bridge;
+mod retry; // Enhanced retry and circuit breaker mechanisms
 mod storage;
 mod sync; // Data synchronization with CRDT
 
@@ -15,7 +16,6 @@ use axum::{routing::get, Router};
 // Arc used in places during runtime; prefix to avoid unused import warning in some builds
 #[allow(unused_imports)]
 use std::sync::Arc;
-use tracing_subscriber;
 
 /// Start the Iroh Relay Server
 async fn start_relay_server(_endpoint: iroh::Endpoint, bind_addr: String) -> Result<()> {
@@ -176,7 +176,7 @@ async fn main() -> Result<()> {
 
     // Initialize SyncManager with blob store for persistent operations
     let sync_manager =
-        sync::SyncManager::with_store(storage.clone(), node_id.into(), store.clone());
+        sync::SyncManager::with_store(storage.clone(), node_id, store.clone());
     tracing::info!("SyncManager initialized with persistent blob storage");
 
     // Attempt to load previous sync index hashes from disk (if present)
@@ -332,10 +332,10 @@ async fn main() -> Result<()> {
                     let event = graphql::MessageEvent {
                         topic: msg.topic.clone(),
                         payload: msg.payload.clone(),
-                        timestamp: msg.timestamp as i64,
+                        timestamp: msg.timestamp,
                     };
 
-                    if let Ok(_) = broadcast_clone.send(event) {
+                    if broadcast_clone.send(event).is_ok() {
                         if !msg.message_id.is_empty() {
                             seen_message_ids.insert(msg.message_id.clone());
                         }

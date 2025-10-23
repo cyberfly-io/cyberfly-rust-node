@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::{Stream, StreamExt};
 
-use crate::{crypto, error::DbError, ipfs::IpfsStorage, storage::RedisStorage, sync::SyncManager};
+use crate::{crypto, error::{DbError, STORAGE_NOT_FOUND, SYNC_MANAGER_NOT_FOUND, IPFS_STORAGE_NOT_FOUND, ENDPOINT_NOT_FOUND, MQTT_STORE_NOT_FOUND, MQTT_BRIDGE_NOT_AVAILABLE, INVALID_TIMESTAMP, INVALID_TIMESTAMP_FORMAT, MESSAGE_BROADCAST_NOT_FOUND, SYNC_OUTBOUND_NOT_FOUND, DISCOVERED_PEERS_NOT_FOUND}, ipfs::IpfsStorage, storage::RedisStorage, sync::SyncManager};
 
 #[derive(SimpleObject, Clone)]
 pub struct StorageResult {
@@ -272,7 +272,7 @@ impl QueryRoot {
     ) -> Result<QueryResult, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let value = storage.get_string(&full_key).await.map_err(DbError::from)?;
@@ -291,7 +291,7 @@ impl QueryRoot {
     ) -> Result<Vec<StringEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let items = storage.get_all_strings(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -313,7 +313,7 @@ impl QueryRoot {
     ) -> Result<Vec<HashEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let items = storage.get_all_hashes(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -335,7 +335,7 @@ impl QueryRoot {
     ) -> Result<Vec<ListEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let items = storage.get_all_lists(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -357,7 +357,7 @@ impl QueryRoot {
     ) -> Result<Vec<SetEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let items = storage.get_all_sets(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -379,7 +379,7 @@ impl QueryRoot {
     ) -> Result<Vec<SortedSetEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let items = storage.get_all_sorted_sets(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -411,7 +411,7 @@ impl QueryRoot {
     ) -> Result<Vec<StreamEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let items = storage.get_all_stream_entries(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -433,7 +433,7 @@ impl QueryRoot {
     ) -> Result<Vec<TimeSeriesEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let items = storage.get_all_timeseries(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -455,7 +455,7 @@ impl QueryRoot {
     ) -> Result<Vec<GeoEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let items = storage.get_all_geo(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -479,7 +479,7 @@ impl QueryRoot {
     ) -> Result<QueryResult, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let value = storage
@@ -502,7 +502,7 @@ impl QueryRoot {
     ) -> Result<Vec<QueryResult>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let fields = storage
@@ -530,7 +530,7 @@ impl QueryRoot {
     ) -> Result<Vec<String>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let start = start.unwrap_or(0) as isize;
@@ -551,7 +551,7 @@ impl QueryRoot {
     ) -> Result<Vec<String>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         storage.get_set(&full_key).await.map_err(DbError::from)
@@ -568,7 +568,7 @@ impl QueryRoot {
     ) -> Result<Vec<SortedSetEntry>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let start = start.unwrap_or(0) as isize;
@@ -588,7 +588,7 @@ impl QueryRoot {
     async fn get_ipfs_file(&self, ctx: &Context<'_>, cid: String) -> Result<String, DbError> {
         let ipfs = ctx
             .data::<IpfsStorage>()
-            .map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(IPFS_STORAGE_NOT_FOUND.to_string()))?;
 
         // Use get_bytes (cid is actually a hash string in Iroh)
         let data = ipfs
@@ -606,7 +606,7 @@ impl QueryRoot {
     async fn list_ipfs_pins(&self, ctx: &Context<'_>) -> Result<Vec<String>, DbError> {
         let _ipfs = ctx
             .data::<IpfsStorage>()
-            .map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(IPFS_STORAGE_NOT_FOUND.to_string()))?;
 
         // TODO: Implement listing all stored blobs in Iroh
         // For now, return empty list
@@ -625,7 +625,7 @@ impl QueryRoot {
     ) -> Result<QueryResult, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let value = storage
@@ -649,7 +649,7 @@ impl QueryRoot {
     ) -> Result<QueryResult, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let value = storage
@@ -671,7 +671,7 @@ impl QueryRoot {
     ) -> Result<Vec<JsonWithMeta>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let items = storage
             .get_all_json_with_meta(&db_name)
@@ -704,7 +704,7 @@ impl QueryRoot {
     ) -> Result<Vec<StoredEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let items = storage.get_all(&db_name).await.map_err(DbError::from)?;
 
@@ -736,7 +736,7 @@ impl QueryRoot {
     ) -> Result<Vec<StreamEntry>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let start = start.as_deref().unwrap_or("-");
@@ -772,7 +772,7 @@ impl QueryRoot {
     ) -> Result<Vec<StreamEntry>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let start = start.as_deref().unwrap_or("-");
@@ -804,7 +804,7 @@ impl QueryRoot {
     ) -> Result<i32, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let length = storage.xlen(&full_key).await.map_err(DbError::from)?;
@@ -825,7 +825,7 @@ impl QueryRoot {
     ) -> Result<Vec<TimeSeriesPoint>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let from_ts = from_timestamp
@@ -862,7 +862,7 @@ impl QueryRoot {
     ) -> Result<Vec<TimeSeriesPoint>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let from_ts = from_timestamp
@@ -895,7 +895,7 @@ impl QueryRoot {
     ) -> Result<Option<TimeSeriesPoint>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let data = storage.ts_get(&full_key).await.map_err(DbError::from)?;
@@ -918,7 +918,7 @@ impl QueryRoot {
     ) -> Result<Option<GeoLocation>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let pos = storage
@@ -946,7 +946,7 @@ impl QueryRoot {
     ) -> Result<Vec<GeoResult>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let unit_str = unit.as_deref().unwrap_or("m");
@@ -977,7 +977,7 @@ impl QueryRoot {
     ) -> Result<Vec<GeoResult>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let unit_str = unit.as_deref().unwrap_or("m");
@@ -1008,7 +1008,7 @@ impl QueryRoot {
     ) -> Result<Option<f64>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
 
@@ -1030,7 +1030,7 @@ impl QueryRoot {
     ) -> Result<Vec<QueryResult>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let fields = storage
@@ -1057,7 +1057,7 @@ impl QueryRoot {
     ) -> Result<Vec<String>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         storage
@@ -1076,7 +1076,7 @@ impl QueryRoot {
     ) -> Result<Vec<String>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         storage
@@ -1096,7 +1096,7 @@ impl QueryRoot {
     ) -> Result<Vec<SortedSetEntry>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let results = storage
@@ -1149,15 +1149,16 @@ impl QueryRoot {
     ) -> Result<Vec<BlobOperation>, DbError> {
         let sync_manager = ctx
             .data::<SyncManager>()
-            .map_err(|_| DbError::InternalError("SyncManager not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(SYNC_MANAGER_NOT_FOUND.to_string()))?;
 
-        let all_operations = sync_manager.sync_store().get_all_operations().await;
+        let limit = limit.unwrap_or(100) as usize;
+        
+        // Use the new memory-efficient method
+        let operations = sync_manager.sync_store().get_operations_for_db_limited(&db_name, limit).await;
 
-        // Filter by database name
-        let filtered_ops: Vec<BlobOperation> = all_operations
+        // Convert to BlobOperation without additional filtering
+        let blob_ops: Vec<BlobOperation> = operations
             .into_iter()
-            .filter(|op| op.db_name == db_name)
-            .take(limit.unwrap_or(100) as usize)
             .map(|op| BlobOperation {
                 op_id: op.op_id,
                 timestamp: op.timestamp.to_string(),
@@ -1177,7 +1178,7 @@ impl QueryRoot {
             })
             .collect();
 
-        Ok(filtered_ops)
+        Ok(blob_ops)
     }
 
     /// Get all blob operations (across all databases)
@@ -1188,14 +1189,17 @@ impl QueryRoot {
     ) -> Result<Vec<BlobOperation>, DbError> {
         let sync_manager = ctx
             .data::<SyncManager>()
-            .map_err(|_| DbError::InternalError("SyncManager not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(SYNC_MANAGER_NOT_FOUND.to_string()))?;
 
+        let limit = limit.unwrap_or(100) as usize;
+        
+        // Get all operations but apply limit efficiently
         let all_operations = sync_manager.sync_store().get_all_operations().await;
 
-        // Apply limit
+        // Apply limit efficiently
         let limited_ops: Vec<BlobOperation> = all_operations
             .into_iter()
-            .take(limit.unwrap_or(100) as usize)
+            .take(limit)
             .map(|op| BlobOperation {
                 op_id: op.op_id,
                 timestamp: op.timestamp.to_string(),
@@ -1228,19 +1232,20 @@ impl QueryRoot {
     ) -> Result<Vec<BlobOperation>, DbError> {
         let sync_manager = ctx
             .data::<SyncManager>()
-            .map_err(|_| DbError::InternalError("SyncManager not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(SYNC_MANAGER_NOT_FOUND.to_string()))?;
 
         let ts = timestamp
             .parse::<i64>()
-            .map_err(|_| DbError::InvalidData("Invalid timestamp".to_string()))?;
+            .map_err(|_| DbError::InvalidData(INVALID_TIMESTAMP.to_string()))?;
 
-        let operations = sync_manager.sync_store().get_operations_since(ts).await;
+        let limit = limit.unwrap_or(100) as usize;
+        
+        // Use the new memory-efficient method that filters by both timestamp and database
+        let operations = sync_manager.sync_store().get_operations_since_for_db_limited(ts, &db_name, limit).await;
 
-        // Filter by database name
+        // Convert to BlobOperation without additional filtering
         let filtered_ops: Vec<BlobOperation> = operations
             .into_iter()
-            .filter(|op| op.db_name == db_name)
-            .take(limit.unwrap_or(100) as usize)
             .map(|op| BlobOperation {
                 op_id: op.op_id,
                 timestamp: op.timestamp.to_string(),
@@ -1271,12 +1276,11 @@ impl QueryRoot {
     ) -> Result<i32, DbError> {
         let sync_manager = ctx
             .data::<SyncManager>()
-            .map_err(|_| DbError::InternalError("SyncManager not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(SYNC_MANAGER_NOT_FOUND.to_string()))?;
 
         if let Some(db) = db_name {
-            // Count operations for specific database
-            let all_operations = sync_manager.sync_store().get_all_operations().await;
-            let count = all_operations.iter().filter(|op| op.db_name == db).count();
+            // Use the new memory-efficient count method for specific database
+            let count = sync_manager.sync_store().get_operations_count_for_db(&db).await;
             Ok(count as i32)
         } else {
             // Count all operations
@@ -1366,17 +1370,17 @@ impl MutationRoot {
     ) -> Result<StorageResult, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError("Storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
 
-        // Verify database name matches public key
-        crypto::verify_db_name(&input.db_name, &input.public_key).map_err(|e| {
+        // Enhanced database name verification with security checks
+        crypto::verify_db_name_secure(&input.db_name, &input.public_key).map_err(|e| {
             DbError::SignatureError(format!("Database name verification failed: {}", e))
         })?;
 
-        // Decode public key and signature from hex
-        let public_key_bytes = hex::decode(&input.public_key)
+        // Securely decode public key and signature from hex with validation
+        let public_key_bytes = crypto::secure_hex_decode(&input.public_key)
             .map_err(|e| DbError::InvalidData(format!("Invalid public key hex: {}", e)))?;
-        let signature_bytes = hex::decode(&input.signature)
+        let signature_bytes = crypto::secure_hex_decode(&input.signature)
             .map_err(|e| DbError::InvalidData(format!("Invalid signature hex: {}", e)))?;
 
         // Create message to verify (db_name:key:value)
@@ -1609,7 +1613,7 @@ impl MutationRoot {
     async fn add_to_ipfs(&self, ctx: &Context<'_>, data: String) -> Result<IpfsResult, DbError> {
         let ipfs = ctx
             .data::<IpfsStorage>()
-            .map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(IPFS_STORAGE_NOT_FOUND.to_string()))?;
 
         let bytes = data.as_bytes();
         let cid = ipfs
@@ -1629,7 +1633,7 @@ impl MutationRoot {
     async fn pin_ipfs(&self, ctx: &Context<'_>, cid: String) -> Result<IpfsResult, DbError> {
         let _ipfs = ctx
             .data::<IpfsStorage>()
-            .map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(IPFS_STORAGE_NOT_FOUND.to_string()))?;
 
         // No-op in Iroh - content is already persistent
         Ok(IpfsResult {
@@ -1647,7 +1651,7 @@ impl MutationRoot {
     async fn unpin_ipfs(&self, ctx: &Context<'_>, cid: String) -> Result<IpfsResult, DbError> {
         let _ipfs = ctx
             .data::<IpfsStorage>()
-            .map_err(|_| DbError::InternalError("IPFS storage not found".to_string()))?;
+            .map_err(|_| DbError::InternalError(IPFS_STORAGE_NOT_FOUND.to_string()))?;
 
         // No-op in Iroh
         Ok(IpfsResult {

@@ -341,7 +341,7 @@ impl IpfsStorage {
         Ok(metadata.owner_public_key == claimed_public_key)
     }
 
-    /// Verify metadata signature
+    /// Verify metadata signature with enhanced security
     /// Message format: "filename:hash:owner_public_key:created_at"
     fn verify_metadata_signature(metadata: &FileMetadata) -> Result<()> {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -352,8 +352,11 @@ impl IpfsStorage {
             metadata.filename, metadata.hash, metadata.owner_public_key, metadata.created_at
         );
 
-        // Decode public key
-        let public_key_bytes = hex::decode(&metadata.owner_public_key)
+        // Validate timestamp
+        crate::crypto::validate_timestamp(metadata.created_at, None)?;
+
+        // Securely decode public key with validation
+        let public_key_bytes = crate::crypto::secure_hex_decode(&metadata.owner_public_key)
             .map_err(|e| anyhow::anyhow!("Invalid public key hex: {}", e))?;
         let verifying_key = VerifyingKey::from_bytes(
             public_key_bytes
@@ -363,8 +366,8 @@ impl IpfsStorage {
         )
         .map_err(|e| anyhow::anyhow!("Invalid public key: {}", e))?;
 
-        // Decode signature
-        let signature_bytes = hex::decode(&metadata.signature)
+        // Securely decode signature with validation
+        let signature_bytes = crate::crypto::secure_hex_decode(&metadata.signature)
             .map_err(|e| anyhow::anyhow!("Invalid signature hex: {}", e))?;
         let signature = Signature::from_bytes(
             signature_bytes
@@ -373,10 +376,8 @@ impl IpfsStorage {
                 .map_err(|_| anyhow::anyhow!("Invalid signature length"))?,
         );
 
-        // Verify signature
-        verifying_key
-            .verify(message.as_bytes(), &signature)
-            .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
+        // Verify signature using enhanced crypto function
+        crate::crypto::verify_signature(&public_key_bytes, message.as_bytes(), &signature_bytes)?;
 
         tracing::debug!(
             "Metadata signature verified for owner: {}",
@@ -385,42 +386,25 @@ impl IpfsStorage {
         Ok(())
     }
 
-    /// Verify delete operation signature
+    /// Verify delete operation signature with enhanced security
     /// Message format: "delete:<metadata_hash>"
     fn verify_delete_signature(
         metadata_hash: &str,
         public_key: &str,
         signature: &str,
     ) -> Result<()> {
-        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-
         let message = format!("delete:{}", metadata_hash);
 
-        // Decode public key
-        let public_key_bytes = hex::decode(public_key)
+        // Securely decode public key with validation
+        let public_key_bytes = crate::crypto::secure_hex_decode(public_key)
             .map_err(|e| anyhow::anyhow!("Invalid public key hex: {}", e))?;
-        let verifying_key = VerifyingKey::from_bytes(
-            public_key_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("Invalid public key length"))?,
-        )
-        .map_err(|e| anyhow::anyhow!("Invalid public key: {}", e))?;
 
-        // Decode signature
-        let signature_bytes =
-            hex::decode(signature).map_err(|e| anyhow::anyhow!("Invalid signature hex: {}", e))?;
-        let sig = Signature::from_bytes(
-            signature_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("Invalid signature length"))?,
-        );
+        // Securely decode signature with validation
+        let signature_bytes = crate::crypto::secure_hex_decode(signature)
+            .map_err(|e| anyhow::anyhow!("Invalid signature hex: {}", e))?;
 
-        // Verify signature
-        verifying_key
-            .verify(message.as_bytes(), &sig)
-            .map_err(|e| anyhow::anyhow!("Delete signature verification failed: {}", e))?;
+        // Verify signature using enhanced crypto function
+        crate::crypto::verify_signature(&public_key_bytes, message.as_bytes(), &signature_bytes)?;
 
         tracing::debug!("Delete signature verified for: {}", public_key);
         Ok(())

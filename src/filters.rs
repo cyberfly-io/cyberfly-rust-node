@@ -318,7 +318,7 @@ impl<'a> TimeSeriesFilter<'a> {
         // Group points into time buckets
         for (ts, val) in points {
             let bucket_ts = (ts / agg.time_bucket) * agg.time_bucket;
-            buckets.entry(bucket_ts).or_insert_with(Vec::new).push(*val);
+            buckets.entry(bucket_ts).or_default().push(*val);
         }
 
         // Aggregate each bucket
@@ -468,16 +468,13 @@ pub struct FilterOptions {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub enum SortOrder {
+    #[default]
     Asc,
     Desc,
 }
 
-impl Default for SortOrder {
-    fn default() -> Self {
-        SortOrder::Asc
-    }
-}
 
 // Time series options
 #[derive(Debug, Clone, Default)]

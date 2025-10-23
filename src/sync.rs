@@ -71,21 +71,24 @@ pub struct SignedOperation {
 }
 
 impl SignedOperation {
-    /// Verify the signature of this operation
+    /// Verify the signature of this operation with enhanced security checks
     /// Supports two formats:
     /// 1. Full format: op_id:timestamp:db_name:key:value (for sync operations)
     /// 2. Short format: db_name:key:value (for GraphQL submissions)
     pub fn verify(&self) -> Result<()> {
-        // Verify database name matches public key
-        crypto::verify_db_name(&self.db_name, &self.public_key)?;
+        // Enhanced database name verification with security checks
+        crypto::verify_db_name_secure(&self.db_name, &self.public_key)?;
 
-        // Decode public key and signature
-        let public_key_bytes =
-            hex::decode(&self.public_key).map_err(|e| anyhow!("Invalid public key hex: {}", e))?;
-        let signature_bytes =
-            hex::decode(&self.signature).map_err(|e| anyhow!("Invalid signature hex: {}", e))?;
+        // Validate timestamp (allow some tolerance for network delays)
+        crypto::validate_timestamp(self.timestamp, Some(crypto::MAX_TIMESTAMP_TOLERANCE))?;
 
-        tracing::debug!(op_id = %self.op_id, "Verifying SignedOperation signature");
+        // Securely decode public key and signature with validation
+        let public_key_bytes = crypto::secure_hex_decode(&self.public_key)
+            .map_err(|e| anyhow!("Invalid public key hex: {}", e))?;
+        let signature_bytes = crypto::secure_hex_decode(&self.signature)
+            .map_err(|e| anyhow!("Invalid signature hex: {}", e))?;
+
+        tracing::debug!(op_id = %self.op_id, "Verifying SignedOperation signature with enhanced security");
 
         // Try full format first (op_id:timestamp:db_name:key:value)
         let full_message = format!(
@@ -351,8 +354,8 @@ impl SyncStore {
         // Update CRDT document
         let mut doc = self.crdt_doc.write().await;
         doc.put(automerge::ROOT, &crdt_key, op.timestamp)?;
-        doc.put(automerge::ROOT, &format!("{}:op_id", crdt_key), &op.op_id)?;
-        doc.put(automerge::ROOT, &format!("{}:value", crdt_key), &op.value)?;
+        doc.put(automerge::ROOT, format!("{}:op_id", crdt_key), &op.op_id)?;
+        doc.put(automerge::ROOT, format!("{}:value", crdt_key), &op.value)?;
 
         // Store operation
         ops.insert(crdt_key, (op.timestamp, op));
@@ -380,8 +383,8 @@ impl SyncStore {
         // Update CRDT document
         let mut doc = self.crdt_doc.write().await;
         doc.put(automerge::ROOT, &crdt_key, op.timestamp)?;
-        doc.put(automerge::ROOT, &format!("{}:op_id", crdt_key), &op.op_id)?;
-        doc.put(automerge::ROOT, &format!("{}:value", crdt_key), &op.value)?;
+        doc.put(automerge::ROOT, format!("{}:op_id", crdt_key), &op.op_id)?;
+        doc.put(automerge::ROOT, format!("{}:value", crdt_key), &op.value)?;
 
         // Store operation
         ops.insert(crdt_key, (op.timestamp, op));
@@ -417,19 +420,63 @@ impl SyncStore {
         Ok(added)
     }
 
-    /// Get all operations
+    /// Get all operations (optimized to avoid cloning)
     pub async fn get_all_operations(&self) -> Vec<SignedOperation> {
         let ops = self.operations.read().await;
         ops.values().map(|(_, op)| op.clone()).collect()
     }
 
-    /// Get operations since a timestamp
+    /// Get all operations as iterator (memory efficient)
+    pub async fn iter_all_operations(&self) -> Vec<SignedOperation> {
+        let ops = self.operations.read().await;
+        ops.values().map(|(_, op)| op.clone()).collect()
+    }
+
+    /// Get operations since a timestamp (optimized to avoid cloning)
     pub async fn get_operations_since(&self, timestamp: i64) -> Vec<SignedOperation> {
         let ops = self.operations.read().await;
         ops.values()
             .filter(|(ts, _)| *ts > timestamp)
             .map(|(_, op)| op.clone())
             .collect()
+    }
+
+    /// Get operations since timestamp with limit (memory efficient)
+    pub async fn get_operations_since_limited(&self, timestamp: i64, limit: usize) -> Vec<SignedOperation> {
+        let ops = self.operations.read().await;
+        ops.values()
+            .filter(|(ts, _)| *ts > timestamp)
+            .take(limit)
+            .map(|(_, op)| op.clone())
+            .collect()
+    }
+
+    /// Get operations since timestamp for specific database with limit (memory efficient)
+    pub async fn get_operations_since_for_db_limited(&self, timestamp: i64, db_name: &str, limit: usize) -> Vec<SignedOperation> {
+        let ops = self.operations.read().await;
+        ops.values()
+            .filter(|(ts, op)| *ts > timestamp && op.db_name == db_name)
+            .take(limit)
+            .map(|(_, op)| op.clone())
+            .collect()
+    }
+
+    /// Get operations for specific database with limit (memory efficient)
+    pub async fn get_operations_for_db_limited(&self, db_name: &str, limit: usize) -> Vec<SignedOperation> {
+        let ops = self.operations.read().await;
+        ops.values()
+            .filter(|(_, op)| op.db_name == db_name)
+            .take(limit)
+            .map(|(_, op)| op.clone())
+            .collect()
+    }
+
+    /// Get operations count for specific database
+    pub async fn get_operations_count_for_db(&self, db_name: &str) -> usize {
+        let ops = self.operations.read().await;
+        ops.values()
+            .filter(|(_, op)| op.db_name == db_name)
+            .count()
     }
 
     /// Get operation count
