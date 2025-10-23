@@ -33,7 +33,7 @@ pub struct MqttConfig {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let api_host = env::var("API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let api_host = env::var("API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
 
         let api_port = env::var("API_PORT")
             .unwrap_or_else(|_| "8080".to_string())

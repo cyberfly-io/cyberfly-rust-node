@@ -1,0 +1,472 @@
+type BlobOperation {
+	opId: String!
+	timestamp: String!
+	dbName: String!
+	key: String!
+	value: String!
+	storeType: String!
+	field: String
+	score: Float
+	jsonPath: String
+	streamFields: String
+	tsTimestamp: String
+	longitude: Float
+	latitude: Float
+	publicKey: String!
+	signature: String!
+}
+
+type GeoEntryGql {
+	key: String!
+	locations: JSON!
+	publicKey: String
+	signature: String
+}
+
+type GeoLocation {
+	member: String!
+	longitude: Float
+	latitude: Float
+}
+
+type GeoResult {
+	member: String!
+	longitude: Float!
+	latitude: Float!
+}
+
+type HashEntryGql {
+	key: String!
+	fields: JSON!
+	publicKey: String
+	signature: String
+}
+
+type IotMessage {
+	topic: String!
+	payload: String!
+	timestamp: String!
+}
+
+type IotPublishResult {
+	success: Boolean!
+	topic: String!
+	message: String!
+}
+
+type IpfsResult {
+	success: Boolean!
+	cid: String
+	message: String!
+}
+
+"""
+A scalar that can represent any JSON value.
+"""
+scalar JSON
+
+type JsonWithMeta {
+	key: String!
+	data: JSON!
+	publicKey: String
+	signature: String
+	timestamp: Int
+}
+
+type ListEntryGql {
+	key: String!
+	items: JSON!
+	publicKey: String
+	signature: String
+}
+
+type MessageUpdate {
+	topic: String!
+	payload: String!
+	timestamp: String!
+}
+
+type MutationRoot {
+	"""
+	Submit signed data to the database
+	"""
+	submitData(input: SignedData!): StorageResult!
+	"""
+	Upload data to IPFS
+	"""
+	addToIpfs(data: String!): IpfsResult!
+	"""
+	Pin a CID in IPFS
+	Note: Iroh doesn't have traditional "pinning" - all added content is persistent by default
+	"""
+	pinIpfs(cid: String!): IpfsResult!
+	"""
+	Unpin a CID in IPFS
+	Note: Iroh doesn't have traditional "unpinning" - garbage collection is handled differently
+	"""
+	unpinIpfs(cid: String!): IpfsResult!
+	"""
+	Publish message to IoT devices via MQTT
+	"""
+	publishIotMessage(topic: String!, payload: String!, qos: Int): IotPublishResult!
+}
+
+type NodeInfo {
+	nodeId: String!
+	peerId: String!
+	health: String!
+	connectedPeers: Int!
+	discoveredPeers: Int!
+	uptimeSeconds: Int!
+	relayUrl: String
+}
+
+type PeerInfo {
+	peerId: String!
+	connectionStatus: String!
+	lastSeen: String!
+}
+
+type QueryResult {
+	key: String!
+	value: String
+}
+
+type QueryRoot {
+	"""
+	Get a string value from storage
+	"""
+	getString(dbName: String!, key: String!): QueryResult!
+	"""
+	Get all string entries for a database
+	"""
+	getAllStrings(dbName: String!): [StringEntryGql!]!
+	"""
+	Get all hashes for a database
+	"""
+	getAllHashes(dbName: String!): [HashEntryGql!]!
+	"""
+	Get all lists for a database
+	"""
+	getAllLists(dbName: String!): [ListEntryGql!]!
+	"""
+	Get all sets for a database
+	"""
+	getAllSets(dbName: String!): [SetEntryGql!]!
+	"""
+	Get all sorted sets for a database
+	"""
+	getAllSortedSets(dbName: String!): [SortedSetEntryGql!]!
+	"""
+	Get all JSON docs for a database (alias uses existing get_all_json)
+	"""
+	getAllJsons(dbName: String!): [JsonWithMeta!]!
+	"""
+	Get all stream entries for a database
+	"""
+	getAllStreams(dbName: String!): [StreamEntryGql!]!
+	"""
+	Get all timeseries for a database
+	"""
+	getAllTimeseries(dbName: String!): [TimeSeriesEntryGql!]!
+	"""
+	Get all geo entries for a database
+	"""
+	getAllGeo(dbName: String!): [GeoEntryGql!]!
+	"""
+	Get a hash field from storage
+	"""
+	getHash(dbName: String!, key: String!, field: String!): QueryResult!
+	"""
+	Get all hash fields from storage
+	"""
+	getAllHash(dbName: String!, key: String!): [QueryResult!]!
+	"""
+	Get list items from storage
+	"""
+	getList(dbName: String!, key: String!, start: Int, stop: Int): [String!]!
+	"""
+	Get set members from storage
+	"""
+	getSet(dbName: String!, key: String!): [String!]!
+	"""
+	Get sorted set range from storage
+	"""
+	getSortedSet(dbName: String!, key: String!, start: Int, stop: Int): [SortedSetEntry!]!
+	"""
+	Get file from IPFS by CID (hash)
+	"""
+	getIpfsFile(cid: String!): String!
+	"""
+	List all pinned CIDs
+	Note: Iroh doesn't have traditional "pinning" - all added content is persistent
+	"""
+	listIpfsPins: [String!]!
+	"""
+	Get JSON document or specific path
+	"""
+	getJson(dbName: String!, key: String!, path: String): QueryResult!
+	"""
+	Filter JSON by JSONPath
+	"""
+	filterJson(dbName: String!, key: String!, jsonPath: String!): QueryResult!
+	"""
+	Get all JSON documents for a database prefix (with signature metadata)
+	"""
+	getAllJson(dbName: String!): [JsonWithMeta!]!
+	"""
+	Get all entries across all store types for a database prefix
+	"""
+	getAll(dbName: String!): [StoredEntryGql!]!
+	"""
+	Get stream entries by range
+	"""
+	getStream(dbName: String!, key: String!, start: String, end: String, count: Int): [StreamEntry!]!
+	"""
+	Filter stream entries by pattern
+	"""
+	filterStream(dbName: String!, key: String!, start: String, end: String, pattern: String): [StreamEntry!]!
+	"""
+	Get stream length
+	"""
+	getStreamLength(dbName: String!, key: String!): Int!
+	"""
+	Get time series data by time range
+	"""
+	getTimeseries(dbName: String!, key: String!, fromTimestamp: String!, toTimestamp: String!): [TimeSeriesPoint!]!
+	"""
+	Filter time series by value range
+	"""
+	filterTimeseries(dbName: String!, key: String!, fromTimestamp: String!, toTimestamp: String!, minValue: Float, maxValue: Float): [TimeSeriesPoint!]!
+	"""
+	Get latest time series value
+	"""
+	getLatestTimeseries(dbName: String!, key: String!): TimeSeriesPoint
+	"""
+	Get location of a member
+	"""
+	getGeoLocation(dbName: String!, key: String!, member: String!): GeoLocation
+	"""
+	Search locations within radius
+	"""
+	searchGeoRadius(dbName: String!, key: String!, longitude: Float!, latitude: Float!, radius: Float!, unit: String): [GeoResult!]!
+	"""
+	Search locations within radius from member
+	"""
+	searchGeoRadiusByMember(dbName: String!, key: String!, member: String!, radius: Float!, unit: String): [GeoResult!]!
+	"""
+	Calculate distance between two members
+	"""
+	getGeoDistance(dbName: String!, key: String!, member1: String!, member2: String!, unit: String): Float
+	"""
+	Filter hash fields by pattern
+	"""
+	filterHash(dbName: String!, key: String!, fieldPattern: String!): [QueryResult!]!
+	"""
+	Filter list by value pattern
+	"""
+	filterList(dbName: String!, key: String!, valuePattern: String!): [String!]!
+	"""
+	Filter set by member pattern
+	"""
+	filterSet(dbName: String!, key: String!, memberPattern: String!): [String!]!
+	"""
+	Filter sorted set by score range
+	"""
+	filterSortedSet(dbName: String!, key: String!, minScore: Float!, maxScore: Float!): [SortedSetEntry!]!
+	"""
+	Get recent IoT messages
+	"""
+	getIotMessages(topicFilter: String, limit: Int): [IotMessage!]!
+	"""
+	Get all blob operations for a specific database
+	"""
+	getBlobOperations(dbName: String!, limit: Int): [BlobOperation!]!
+	"""
+	Get all blob operations (across all databases)
+	"""
+	getAllBlobOperations(limit: Int): [BlobOperation!]!
+	"""
+	Get blob operations by database name since a specific timestamp
+	"""
+	getBlobOperationsSince(dbName: String!, timestamp: String!, limit: Int): [BlobOperation!]!
+	"""
+	Get count of blob operations for a database
+	"""
+	getBlobOperationCount(dbName: String): Int!
+	"""
+	Get node information including peer connections and health
+	"""
+	getNodeInfo: NodeInfo!
+	"""
+	Get list of connected peers
+	"""
+	getConnectedPeers: [PeerInfo!]!
+	"""
+	Get list of discovered peers (not necessarily connected)
+	"""
+	getDiscoveredPeers: [PeerInfo!]!
+	_service: _Service!
+}
+
+type SetEntryGql {
+	key: String!
+	members: JSON!
+	publicKey: String
+	signature: String
+}
+
+input SignedData {
+	"""
+	Database name (must be in format: <name>-<public_key_hex>)
+	"""
+	dbName: String!
+	"""
+	The data key to store
+	"""
+	key: String!
+	"""
+	The data value (JSON string)
+	"""
+	value: String!
+	"""
+	Ed25519 public key (hex encoded)
+	"""
+	publicKey: String!
+	"""
+	Ed25519 signature (hex encoded)
+	"""
+	signature: String!
+	"""
+	Store type: String, Hash, List, Set, SortedSet
+	"""
+	storeType: String!
+	"""
+	Optional field name for Hash store type
+	"""
+	field: String
+	"""
+	Optional score for SortedSet store type
+	"""
+	score: Float
+	"""
+	Optional JSON path for JSON store type (default: "$")
+	"""
+	jsonPath: String
+	"""
+	Optional stream fields for Stream store type (JSON array of key-value pairs)
+	"""
+	streamFields: String
+	"""
+	Optional timestamp for TimeSeries store type (Unix timestamp in seconds)
+	"""
+	timestamp: String
+	"""
+	Optional longitude for Geo store type
+	"""
+	longitude: Float
+	"""
+	Optional latitude for Geo store type
+	"""
+	latitude: Float
+}
+
+type SortedSetEntry {
+	value: String!
+	score: Float!
+}
+
+type SortedSetEntryGql {
+	key: String!
+	members: JSON!
+	publicKey: String
+	signature: String
+}
+
+type StorageResult {
+	success: Boolean!
+	message: String!
+}
+
+type StoredEntryGql {
+	key: String!
+	storeType: String!
+	value: JSON!
+	publicKey: String
+	signature: String
+}
+
+type StreamEntry {
+	id: String!
+	fields: [StreamField!]!
+}
+
+type StreamEntryGql {
+	key: String!
+	entries: JSON!
+	publicKey: String
+	signature: String
+}
+
+type StreamField {
+	key: String!
+	value: String!
+}
+
+type StringEntryGql {
+	key: String!
+	value: String!
+	publicKey: String
+	signature: String
+}
+
+type SubscriptionRoot {
+	"""
+	Subscribe to messages on a specific topic (supports wildcards)
+	"""
+	subscribeTopic(topicFilter: String!): MessageUpdate!
+	"""
+	Subscribe to all messages (no filter)
+	"""
+	subscribeAllMessages: MessageUpdate!
+	"""
+	Subscribe to IoT messages with optional topic filter
+	"""
+	subscribeIotMessages(topicFilter: String): IotMessage!
+}
+
+type TimeSeriesEntryGql {
+	key: String!
+	points: JSON!
+	publicKey: String
+	signature: String
+}
+
+type TimeSeriesPoint {
+	timestamp: String!
+	value: Float!
+}
+
+"""
+The `_Any` scalar is used to pass representations of entities from external
+services into the root `_entities` field for execution.
+"""
+scalar _Any
+
+type _Service {
+	sdl: String
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: QueryRoot
+	mutation: MutationRoot
+	subscription: SubscriptionRoot
+}

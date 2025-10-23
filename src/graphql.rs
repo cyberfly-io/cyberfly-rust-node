@@ -1924,10 +1924,12 @@ pub async fn create_server(
     let schema = schema_builder.finish();
 
     let app = Router::new()
-        .route("/", get(graphiql_handler).post(graphql_handler))
+        .route("/", get(graphiql_handler))
+        .route("/graphql", get(graphql_handler).post(graphql_handler))
         .route("/ws", get(graphql_subscription_handler))
         .route("/playground", get(graphql_playground))
         .route("/schema.graphql", get(graphql_schema_handler))
+        .route("/graphql/schema.graphql", get(graphql_schema_handler))
         .with_state(schema);
 
     Ok(app)
@@ -1951,13 +1953,13 @@ async fn graphql_subscription_handler(
 
 async fn graphql_playground() -> impl axum::response::IntoResponse {
     axum::response::Html(async_graphql::http::playground_source(
-        async_graphql::http::GraphQLPlaygroundConfig::new("/").subscription_endpoint("/ws"),
+        async_graphql::http::GraphQLPlaygroundConfig::new("/graphql").subscription_endpoint("/ws"),
     ))
 }
 
 async fn graphiql_handler() -> impl IntoResponse {
     let graphiql = async_graphql::http::GraphiQLSource::build()
-        .endpoint("/")
+        .endpoint("/graphql")
         .subscription_endpoint("/ws")
         .title("Cyberfly Decentralized Database - GraphiQL")
         .finish();
