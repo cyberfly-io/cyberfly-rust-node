@@ -58,8 +58,8 @@ impl IpfsStorage {
     }
 
     /// Get the node ID of this Iroh instance
-    pub fn node_id(&self) -> iroh::NodeId {
-        self.router.endpoint().node_id()
+    pub fn node_id(&self) -> iroh::EndpointId {
+        self.router.endpoint().id()
     }
 
     /// Get a reference to the endpoint for advanced operations

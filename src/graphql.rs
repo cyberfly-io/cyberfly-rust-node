@@ -1285,7 +1285,7 @@ impl QueryRoot {
             .data::<iroh::Endpoint>()
             .map_err(|_| DbError::InternalError("Endpoint not found".to_string()))?;
 
-        let node_id = endpoint.node_id().to_string();
+        let node_id = endpoint.id().to_string();
 
         // Get basic stats from endpoint
         // Note: Iroh doesn't expose peer count directly, so we return placeholder values
@@ -1327,10 +1327,10 @@ impl QueryRoot {
     /// Get list of discovered peers (not necessarily connected)
     async fn get_discovered_peers(&self, ctx: &Context<'_>) -> Result<Vec<PeerInfo>, DbError> {
         let peers_map = ctx
-            .data::<std::sync::Arc<dashmap::DashMap<iroh::NodeId, chrono::DateTime<chrono::Utc>>>>()
+            .data::<std::sync::Arc<dashmap::DashMap<iroh::EndpointId, chrono::DateTime<chrono::Utc>>>>()
             .map_err(|_| DbError::InternalError("Discovered peers map not found".to_string()))?;
 
-        let peers: Vec<(iroh::NodeId, chrono::DateTime<chrono::Utc>)> = peers_map
+        let peers: Vec<(iroh::EndpointId, chrono::DateTime<chrono::Utc>)> = peers_map
             .iter()
             .map(|entry| (*entry.key(), *entry.value()))
             .collect();
@@ -1868,7 +1868,7 @@ pub async fn create_server(
     ipfs: IpfsStorage, // Now passed in from main with shared network
     sync_manager: Option<SyncManager>,
     endpoint: Option<iroh::Endpoint>, // Pass Endpoint instead of wrapped IrohNetwork
-    discovered_peers: Option<Arc<dashmap::DashMap<iroh::NodeId, chrono::DateTime<chrono::Utc>>>>, // Discovered peers map
+    discovered_peers: Option<Arc<dashmap::DashMap<iroh::EndpointId, chrono::DateTime<chrono::Utc>>>>, // Discovered peers map
     mqtt_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::GossipToMqttMessage>>,
     mqtt_to_gossip_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::MqttToGossipMessage>,

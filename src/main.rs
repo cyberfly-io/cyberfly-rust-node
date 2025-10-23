@@ -99,9 +99,7 @@ async fn main() -> Result<()> {
     );
 
     let endpoint = iroh::Endpoint::builder()
-        .discovery_n0() // Enable n0 DNS discovery for peer finding
-        //discovery_dht()  // Enable DHT discovery for peer finding
-        .discovery_local_network() // Enable local network discovery (mDNS)
+        // TODO: Migrate to new discovery API in iroh 0.94 (unified discovery())
         .secret_key(secret_key)
         .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::empty())) // Enable relay mode
         .bind_addr_v4(bind_addr) // Bind to fixed port 11204 (fallback to random if unavailable)
@@ -114,7 +112,7 @@ async fn main() -> Result<()> {
         tracing::info!("🔌 Iroh QUIC endpoint listening on: {}", addr);
     }
 
-    let node_id = endpoint.node_id();
+    let node_id = endpoint.id();
     tracing::info!("Iroh endpoint created with Node ID: {}", node_id);
     tracing::info!("🔄 Relay mode enabled - this node can act as a relay for other peers");
     tracing::info!("🔍 Peer discovery: Use n0 DNS discovery or share node addresses manually");

@@ -26,11 +26,11 @@ signature = "2.2"
 automerge = "0.6"
 
 # IPFS - Using Iroh (modern Rust IPFS implementation)
-# Upgraded to 0.93 for latest features and compatibility
-iroh = { version = "0.93.2", features = ["discovery-local-network", "discovery-pkarr-dht"] }
-iroh-blobs = "0.95"
-iroh-gossip = "0.93"
-iroh-docs = "0.93"
+# Upgrade to 0.94 for latest breaking changes
+iroh = { version = "0.94.0", features = ["discovery-local-network", "discovery-pkarr-dht"] }
+iroh-blobs = "0.96.0"
+iroh-gossip = "0.94.0"
+iroh-docs = "0.94.0"
 dashmap = "6.0"
 
 # MQTT

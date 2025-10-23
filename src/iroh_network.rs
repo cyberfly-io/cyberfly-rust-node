@@ -2,7 +2,7 @@
 // Replaces libp2p with Iroh's Endpoint + Router + Gossip + Blobs
 
 use anyhow::Result;
-use iroh::{Endpoint, NodeId, SecretKey, protocol::Router};
+use iroh::{Endpoint, EndpointId, SecretKey, protocol::Router};
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_gossip::{
     net::Gossip, 
@@ -21,9 +21,9 @@ use crate::mqtt_bridge::{GossipToMqttMessage, MqttToGossipMessage, MessageOrigin
 /// Network event types
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
-    Message { peer: NodeId, data: Vec<u8> },
-    PeerDiscovered { peer: NodeId },
-    PeerExpired { peer: NodeId },
+    Message { peer: EndpointId, data: Vec<u8> },
+    PeerDiscovered { peer: EndpointId },
+    PeerExpired { peer: EndpointId },
 }
 
 /// Message format for gossip protocol
@@ -79,7 +79,7 @@ pub struct IrohNetwork {
     gossip: Gossip,
     blobs: BlobsProtocol,
     store: FsStore,
-    node_id: NodeId,
+    node_id: EndpointId,
     event_tx: mpsc::UnboundedSender<NetworkEvent>,
     event_rx: Arc<RwLock<mpsc::UnboundedReceiver<NetworkEvent>>>,
     mqtt_to_libp2p_rx: Option<mpsc::UnboundedReceiver<MqttToGossipMessage>>,
@@ -97,18 +97,18 @@ pub struct IrohNetwork {
     discovery_sender: Option<Arc<Mutex<GossipSender>>>,
     sync_sender: Option<Arc<Mutex<GossipSender>>>,  // Sync topic sender
     // Simple peer tracking - stores peers seen in gossip messages
-    discovered_peers: Arc<dashmap::DashMap<NodeId, chrono::DateTime<chrono::Utc>>>,
+    discovered_peers: Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
     // Bootstrap peers for initial gossip network join
-    bootstrap_peers: Vec<NodeId>,
+    bootstrap_peers: Vec<EndpointId>,
 }
 
 impl IrohNetwork {
     /// Parse bootstrap peers from config strings
     /// 
     /// Accepts formats:
-    /// - Full address: "NodeId@ip:port" (extracts just the NodeId)
-    /// - NodeId only: "8921781873f3b664e020c4fe1c5b9796e70adccbaa26d12a39de9b317d9e9269"
-    fn parse_bootstrap_peers(peer_strings: &[String]) -> Vec<NodeId> {
+    /// - Full address: "NodeId@ip:port" (extracts just the EndpointId)
+    /// - EndpointId only: "8921781873f3b664e020c4fe1c5b9796e70adccbaa26d12a39de9b317d9e9269"
+    fn parse_bootstrap_peers(peer_strings: &[String]) -> Vec<EndpointId> {
         let mut node_ids = Vec::new();
         
         for peer_str in peer_strings {
@@ -117,15 +117,15 @@ impl IrohNetwork {
                 continue;
             }
             
-            // Extract NodeId from "NodeId@ip:port" format or use as-is
+            // Extract EndpointId from "EndpointId@ip:port" format or use as-is
             let node_id_str = if let Some(idx) = peer_str.find('@') {
                 &peer_str[..idx]
             } else {
                 peer_str
             };
             
-            // Try to parse as NodeId
-            match node_id_str.parse::<NodeId>() {
+            // Try to parse as EndpointId
+            match node_id_str.parse::<EndpointId>() {
                 Ok(node_id) => {
                     tracing::info!("Parsed bootstrap peer: {}", node_id);
                     node_ids.push(node_id);
@@ -178,7 +178,7 @@ impl IrohNetwork {
     ) -> Self {
         tracing::info!("Initializing Iroh network from shared components");
         
-        let node_id = endpoint.node_id();
+        let node_id = endpoint.id();
         
         // Create event channel
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -216,7 +216,7 @@ impl IrohNetwork {
     }
 
     /// Get the local node ID
-    pub fn peer_id(&self) -> NodeId {
+    pub fn peer_id(&self) -> EndpointId {
         self.node_id
     }
 
@@ -519,9 +519,9 @@ impl IrohNetwork {
     /// Handle sync protocol events
     async fn handle_sync_event(
         event: GossipEvent, 
-        node_id: NodeId,
+        node_id: EndpointId,
         event_tx: &mpsc::UnboundedSender<NetworkEvent>,
-        discovered_peers: &Arc<dashmap::DashMap<NodeId, chrono::DateTime<chrono::Utc>>>,
+        discovered_peers: &Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
     ) -> Result<()> {
                 match event {
                     GossipEvent::Received(msg) => {
@@ -572,10 +572,10 @@ impl IrohNetwork {
     async fn handle_gossip_event(
         event: GossipEvent, 
         topic_type: &str,
-        node_id: NodeId,
+        node_id: EndpointId,
         event_tx: &mpsc::UnboundedSender<NetworkEvent>,
         libp2p_to_mqtt_tx: &Option<mpsc::UnboundedSender<GossipToMqttMessage>>,
-        discovered_peers: &Arc<dashmap::DashMap<NodeId, chrono::DateTime<chrono::Utc>>>,
+        discovered_peers: &Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
     ) -> Result<()> {
         match event {
             GossipEvent::Received(msg) => {
@@ -701,7 +701,7 @@ impl IrohNetwork {
     async fn forward_mqtt_to_gossip(
         mqtt_msg: MqttToGossipMessage,
         data_sender: Arc<Mutex<GossipSender>>,
-        node_id: NodeId,
+        node_id: EndpointId,
     ) -> Result<()> {
         tracing::info!("🔄 Forwarding MQTT message to gossip - topic: {}, payload_size: {}", 
             mqtt_msg.topic, mqtt_msg.payload.len());
@@ -751,12 +751,22 @@ impl IrohNetwork {
             anyhow::bail!("Network not started - call run() first");
         };
 
-        let node_addr = self.endpoint.node_addr();
+        let endpoint_addr = self.endpoint.addr();
+        let relay_url = endpoint_addr
+            .relay_urls()
+            .into_iter()
+            .next()
+            .map(|u| u.to_string());
+        let ip_addresses: Vec<String> = endpoint_addr
+            .ip_addrs()
+            .into_iter()
+            .map(|addr| addr.to_string())
+            .collect();
         
         let announcement = serde_json::json!({
             "node_id": self.node_id.to_string(),
-            "relay_url": node_addr.relay_url().map(|u| u.to_string()),
-            "direct_addresses": node_addr.direct_addresses().map(|addr| addr.to_string()).collect::<Vec<_>>(),
+            "relay_url": relay_url,
+            "ip_addresses": ip_addresses,
         });
 
         let payload = serde_json::to_vec(&announcement)?;
@@ -833,7 +843,7 @@ impl IrohNetwork {
     }
 
     /// Get list of connected peers with last seen timestamp
-    pub async fn get_connected_peers(&self) -> Vec<(NodeId, chrono::DateTime<chrono::Utc>)> {
+    pub async fn get_connected_peers(&self) -> Vec<(EndpointId, chrono::DateTime<chrono::Utc>)> {
         self.discovered_peers
             .iter()
             .map(|entry| (*entry.key(), *entry.value()))
@@ -841,13 +851,12 @@ impl IrohNetwork {
     }
 
     /// Get list of discovered peers (same as connected for Iroh)
-    pub async fn get_discovered_peers(&self) -> Vec<(NodeId, chrono::DateTime<chrono::Utc>)> {
-        // In Iroh with gossip discovery, discovered and connected are essentially the same
+    pub async fn get_discovered_peers(&self) -> Vec<(EndpointId, chrono::DateTime<chrono::Utc>)> {
         self.get_connected_peers().await
     }
     
     /// Get a cloneable reference to the discovered peers map
-    pub fn discovered_peers_map(&self) -> Arc<dashmap::DashMap<NodeId, chrono::DateTime<chrono::Utc>>> {
+    pub fn discovered_peers_map(&self) -> Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>> {
         self.discovered_peers.clone()
     }
 }

@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use automerge::{transaction::Transactable, AutoCommit};
-use iroh::NodeId;
+use iroh::EndpointId;
 use iroh_blobs::{store::fs::FsStore, Hash};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -18,7 +18,7 @@ use crate::storage::RedisStorage;
 pub enum SyncMessage {
     /// Request all data from a peer (bootstrap sync)
     SyncRequest {
-        requester: String,            // NodeId as string
+        requester: String,            // EndpointId as string
         since_timestamp: Option<i64>, // Unix timestamp, None = full sync
     },
     /// Response with data operations
@@ -470,21 +470,21 @@ impl Default for SyncStore {
 pub struct SyncManager {
     sync_store: Arc<SyncStore>,
     storage: RedisStorage,
-    local_node_id: NodeId,
+    local_node_id: EndpointId,
 }
 
 impl Clone for SyncManager {
     fn clone(&self) -> Self {
         Self {
-            sync_store: Arc::clone(&self.sync_store),
+            sync_store: self.sync_store.clone(),
             storage: self.storage.clone(),
-            local_node_id: self.local_node_id.clone(),
+            local_node_id: self.local_node_id,
         }
     }
 }
 
 impl SyncManager {
-    pub fn new(storage: RedisStorage, local_node_id: NodeId) -> Self {
+    pub fn new(storage: RedisStorage, local_node_id: EndpointId) -> Self {
         Self {
             sync_store: Arc::new(SyncStore::new()),
             storage,
@@ -492,8 +492,7 @@ impl SyncManager {
         }
     }
 
-    /// Create with Iroh blob store for persistence
-    pub fn with_store(storage: RedisStorage, local_node_id: NodeId, store: FsStore) -> Self {
+    pub fn with_store(storage: RedisStorage, local_node_id: EndpointId, store: FsStore) -> Self {
         Self {
             sync_store: Arc::new(SyncStore::with_store(store)),
             storage,
@@ -565,7 +564,7 @@ impl SyncManager {
     pub async fn handle_sync_message(
         &self,
         msg: SyncMessage,
-        from_peer: NodeId,
+        from_peer: EndpointId,
     ) -> Result<Option<SyncMessage>> {
         match msg {
             SyncMessage::SyncRequest {
@@ -749,27 +748,19 @@ impl SyncManager {
     }
 
     /// Request full sync from a bootstrap peer
-    pub async fn request_full_sync(&self, peer: NodeId) -> Result<SyncMessage> {
-        tracing::info!("Requesting full sync from peer: {}", peer);
-
+    pub async fn request_full_sync(&self, peer: EndpointId) -> Result<SyncMessage> {
         Ok(SyncMessage::SyncRequest {
             requester: self.local_node_id.to_string(),
-            since_timestamp: None, // Full sync
+            since_timestamp: None,
         })
     }
 
     /// Request incremental sync from a peer (since last sync)
     pub async fn request_incremental_sync(
         &self,
-        peer: NodeId,
+        peer: EndpointId,
         since_timestamp: i64,
     ) -> Result<SyncMessage> {
-        tracing::info!(
-            "Requesting incremental sync from peer: {} (since: {})",
-            peer,
-            since_timestamp
-        );
-
         Ok(SyncMessage::SyncRequest {
             requester: self.local_node_id.to_string(),
             since_timestamp: Some(since_timestamp),
