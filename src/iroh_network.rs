@@ -268,31 +268,50 @@ impl IrohNetwork {
         
         // Subscribe to data topic with bootstrap peers
         let data_topic = self.gossip.subscribe(self.data_topic, bootstrap_peers.clone()).await?;
-        let (data_sender, data_receiver) = data_topic.split();
+        let (data_sender, mut data_receiver) = data_topic.split();
         self.data_sender = Some(Arc::new(Mutex::new(data_sender)));
         tracing::info!("Subscribed to data topic");
 
         // Subscribe to discovery topic with bootstrap peers
         let discovery_topic = self.gossip.subscribe(self.discovery_topic, bootstrap_peers.clone()).await?;
-        let (discovery_sender, discovery_receiver) = discovery_topic.split();
+        let (discovery_sender, mut discovery_receiver) = discovery_topic.split();
         self.discovery_sender = Some(Arc::new(Mutex::new(discovery_sender)));
         tracing::info!("Subscribed to discovery topic");
         
         // Subscribe to sync topic with bootstrap peers
         let sync_topic = self.gossip.subscribe(self.sync_topic, bootstrap_peers.clone()).await?;
-        let (sync_sender, sync_receiver) = sync_topic.split();
+        let (sync_sender, mut sync_receiver) = sync_topic.split();
         self.sync_sender = Some(Arc::new(Mutex::new(sync_sender)));
         tracing::info!("Subscribed to sync topic");
+
+        // Wait for peers to join before starting broadcasts (following iroh-gossip best practices)
+        if !bootstrap_peers.is_empty() {
+            tracing::info!("Waiting for peers to join gossip network...");
+            tokio::select! {
+                result = discovery_receiver.joined() => {
+                    match result {
+                        Ok(_) => tracing::info!("✓ Successfully joined gossip network with peers"),
+                        Err(e) => tracing::warn!("Failed to join gossip network: {}", e),
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                    tracing::warn!("Timeout waiting for peers to join - continuing anyway");
+                }
+            }
+        }
 
         // Get node_id first before using in beacon task
         let node_id = self.node_id;
 
-        // Start a peer discovery broadcast task
+        // Start a peer discovery broadcast task (only after successful gossip join)
         // This helps peers find each other by periodically sending discovery beacons
         let discovery_beacon_sender = Arc::clone(&self.discovery_sender.as_ref().unwrap());
         let beacon_node_id = node_id;
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            // Wait a bit before starting beacons to allow gossip network to stabilize
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15)); // Reduced frequency
             loop {
                 interval.tick().await;
                 
