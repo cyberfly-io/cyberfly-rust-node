@@ -262,6 +262,10 @@ async fn main() -> Result<()> {
     let peer_id = network.peer_id();
     tracing::info!("Iroh network initialized with shared Node ID: {}", peer_id);
 
+    // Attach SyncManager to the network for inbound event handling
+    network.attach_sync_manager(sync_manager.clone());
+    tracing::info!("SyncManager attached to Iroh network for sync routing");
+
     // Initialize MQTT bridge if enabled
     // Create broadcast channel for real-time message subscriptions first
     let (message_broadcast_tx, _message_broadcast_rx) = tokio::sync::broadcast::channel(1000);

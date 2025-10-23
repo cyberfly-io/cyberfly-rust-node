@@ -86,6 +86,8 @@ pub struct IrohNetwork {
     libp2p_to_mqtt_tx: Option<mpsc::UnboundedSender<GossipToMqttMessage>>,
     /// Optional receiver for outbound sync messages from other components (e.g. GraphQL)
     sync_outbound_rx: Option<mpsc::UnboundedReceiver<crate::sync::SyncMessage>>,
+    /// Optional SyncManager to process inbound sync messages and drive bootstrap sync
+    sync_manager: Option<crate::sync::SyncManager>,
     // Gossip topics
     data_topic: TopicId,
     discovery_topic: TopicId,
@@ -150,6 +152,10 @@ impl IrohNetwork {
         self.sync_outbound_rx = Some(rx);
     }
 
+    /// Attach a SyncManager so the network can process inbound sync traffic
+    pub fn attach_sync_manager(&mut self, sync_manager: crate::sync::SyncManager) {
+        self.sync_manager = Some(sync_manager);
+    }
     /// Create Iroh network from existing components (recommended)
     /// 
     /// This constructor allows sharing a single Iroh node across multiple
@@ -197,6 +203,7 @@ impl IrohNetwork {
             mqtt_to_libp2p_rx: None,
             libp2p_to_mqtt_tx: None,
             sync_outbound_rx: None,
+            sync_manager: None,
             data_topic,
             discovery_topic,
             sync_topic,
@@ -308,6 +315,84 @@ impl IrohNetwork {
         });
         tracing::info!("🔍 Started peer discovery beacon (broadcasts every 10s)");
 
+        // Process inbound network events and route to SyncManager
+        {
+            let event_rx = Arc::clone(&self.event_rx);
+            let sync_manager = self.sync_manager.clone();
+            let sync_sender = self.sync_sender.clone();
+            let local_node_id = node_id;
+            tokio::spawn(async move {
+                loop {
+                    // Receive next network event
+                    let evt_opt = {
+                        let mut rx = event_rx.write().await;
+                        rx.recv().await
+                    };
+                    let Some(evt) = evt_opt else {
+                        // Channel closed; exit task
+                        break;
+                    };
+        
+                    match evt {
+                        NetworkEvent::Message { peer, data } => {
+                            // Ignore our own messages
+                            if peer == local_node_id {
+                                continue;
+                            }
+                            // Parse payload as SyncMessage
+                            match serde_json::from_slice::<crate::sync::SyncMessage>(&data) {
+                                Ok(sync_msg) => {
+                                    if let Some(manager) = sync_manager.as_ref() {
+                                        match manager.handle_sync_message(sync_msg, peer).await {
+                                            Ok(Some(response)) => {
+                                                if let Some(sender) = &sync_sender {
+                                                    if let Ok(payload) = serde_json::to_vec(&response) {
+                                                        if let Err(e) = sender.lock().await.broadcast(payload.into()).await {
+                                                            tracing::error!("Failed to broadcast sync response to {}: {}", peer, e);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Ok(None) => {}
+                                            Err(e) => {
+                                                tracing::error!("Failed to handle sync message from {}: {}", peer, e);
+                                            }
+                                        }
+                                    } else {
+                                        tracing::warn!("SyncManager not attached; dropping inbound sync message");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to parse inbound sync payload as SyncMessage: {}", e);
+                                }
+                            }
+                        }
+                        NetworkEvent::PeerDiscovered { peer } => {
+                            // Initiate bootstrap full sync with newly discovered peer
+                            if let Some(manager) = sync_manager.as_ref() {
+                                match manager.request_full_sync(peer).await {
+                                    Ok(request) => {
+                                        if let Some(sender) = &sync_sender {
+                                            if let Ok(payload) = serde_json::to_vec(&request) {
+                                                if let Err(e) = sender.lock().await.broadcast(payload.into()).await {
+                                                    tracing::error!("Failed to broadcast sync request to {}: {}", peer, e);
+                                                } else {
+                                                    tracing::info!("Initiated bootstrap sync with {}", peer);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => tracing::error!("Failed to create sync request: {}", e),
+                                }
+                            }
+                        }
+                        NetworkEvent::PeerExpired { peer } => {
+                            tracing::info!("Peer expired: {}", peer);
+                        }
+                    }
+                }
+            });
+        }
         // Get clones for the event loop
         let data_sender_clone = self.data_sender.clone().unwrap();
         let libp2p_to_mqtt_tx = self.libp2p_to_mqtt_tx.clone();
