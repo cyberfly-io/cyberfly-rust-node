@@ -206,6 +206,14 @@ pub struct PeerInfo {
     pub last_seen: String,
 }
 
+#[derive(SimpleObject, Clone)]
+pub struct SyncResult {
+    pub success: bool,
+    pub message: String,
+    pub peer_id: Option<String>,
+    pub operations_requested: Option<i32>,
+}
+
 /// Real-time message event for subscriptions
 #[derive(Clone, Debug)]
 pub struct MessageEvent {
@@ -1717,6 +1725,59 @@ impl MutationRoot {
             success: true,
             topic: topic.clone(),
             message: format!("Message published to topic: {}", topic),
+        })
+    }
+
+    /// Request sync from connected peers
+    async fn request_sync(
+        &self,
+        ctx: &Context<'_>,
+        peer_id: Option<String>,
+        full_sync: Option<bool>,
+    ) -> Result<SyncResult, DbError> {
+        let sync_out_tx = ctx
+            .data::<tokio::sync::mpsc::UnboundedSender<crate::sync::SyncMessage>>()
+            .map_err(|_| DbError::InternalError("Sync outbound sender not found".to_string()))?;
+
+        let is_full_sync = full_sync.unwrap_or(true);
+        
+        // Get local node ID for requester field
+        let local_node_id = if let Ok(sync_manager) = ctx.data::<SyncManager>() {
+            let stats = sync_manager.get_stats().await;
+            stats.local_node_id
+        } else {
+            // Fallback to a placeholder if SyncManager is not available
+            "unknown".to_string()
+        };
+
+        // Create sync request message
+        let sync_message = if is_full_sync {
+            crate::sync::SyncMessage::SyncRequest {
+                requester: local_node_id,
+                since_timestamp: None, // Full sync - no timestamp filter
+            }
+        } else {
+            // For incremental sync, use timestamp from 1 hour ago as example
+            let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+            crate::sync::SyncMessage::SyncRequest {
+                requester: local_node_id,
+                since_timestamp: Some(one_hour_ago.timestamp()),
+            }
+        };
+
+        // Send sync request
+        sync_out_tx
+            .send(sync_message)
+            .map_err(|e| DbError::InternalError(format!("Failed to send sync request: {}", e)))?;
+
+        let sync_type = if is_full_sync { "full" } else { "incremental" };
+        let target = peer_id.clone().unwrap_or_else(|| "all connected peers".to_string());
+
+        Ok(SyncResult {
+            success: true,
+            message: format!("Sync request ({}) sent to {}", sync_type, target),
+            peer_id,
+            operations_requested: None, // Will be updated when response comes
         })
     }
 }

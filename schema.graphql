@@ -109,6 +109,10 @@ type MutationRoot {
 	Publish message to IoT devices via MQTT
 	"""
 	publishIotMessage(topic: String!, payload: String!, qos: Int): IotPublishResult!
+	"""
+	Request sync from connected peers
+	"""
+	requestSync(peerId: String, fullSync: Boolean): SyncResult!
 }
 
 type NodeInfo {
@@ -386,6 +390,13 @@ type SortedSetEntryGql {
 type StorageResult {
 	success: Boolean!
 	message: String!
+}
+
+type SyncResult {
+	success: Boolean!
+	message: String!
+	peerId: String
+	operationsRequested: Int
 }
 
 type StoredEntryGql {
