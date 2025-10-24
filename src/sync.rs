@@ -868,11 +868,10 @@ pub struct SyncStats {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-    use rand::rngs::OsRng;
 
     #[test]
     fn test_signed_operation_verify() {
-        let mut csprng = OsRng;
+        let mut csprng = rand::thread_rng();
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
         let public_key_hex = hex::encode(verifying_key.as_bytes());

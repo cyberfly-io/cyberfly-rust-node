@@ -1,11 +1,10 @@
 use cyberfly_rust_node::crypto;
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
 async fn test_verify_signature_valid() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_bytes = verifying_key.as_bytes();
@@ -20,7 +19,7 @@ async fn test_verify_signature_valid() {
 
 #[tokio::test]
 async fn test_verify_signature_invalid() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_bytes = verifying_key.as_bytes();
@@ -48,7 +47,7 @@ async fn test_verify_signature_invalid_key_length() {
 
 #[tokio::test]
 async fn test_verify_signature_invalid_signature_length() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_bytes = verifying_key.as_bytes();
@@ -63,7 +62,7 @@ async fn test_verify_signature_invalid_signature_length() {
 
 #[tokio::test]
 async fn test_verify_signature_message_too_large() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_bytes = verifying_key.as_bytes();
@@ -74,7 +73,7 @@ async fn test_verify_signature_message_too_large() {
     
     let result = crypto::verify_signature(public_key_bytes, &large_message, &signature_bytes);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Message too large"));
+    assert!(result.unwrap_err().to_string().contains("Message exceeds maximum allowed size"));
 }
 
 #[tokio::test]
@@ -93,11 +92,11 @@ async fn test_validate_timestamp_future() {
     let future_timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_millis() as i64 + 3600000; // 1 hour in the future
+        .as_millis() as i64 + 7200000; // 2 hours in the future (beyond 1 hour tolerance)
     
     let result = crypto::validate_timestamp(future_timestamp, None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Timestamp is in the future"));
+    assert!(result.unwrap_err().to_string().contains("Timestamp is too far in the future"));
 }
 
 #[tokio::test]
@@ -107,9 +106,9 @@ async fn test_validate_timestamp_too_old() {
         .unwrap()
         .as_millis() as i64 - 7200000; // 2 hours ago
     
-    let result = crypto::validate_timestamp(old_timestamp, Some(3600000)); // 1 hour tolerance
+    let result = crypto::validate_timestamp(old_timestamp, Some(3600)); // 1 hour tolerance in seconds
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Timestamp too old"));
+    assert!(result.unwrap_err().to_string().contains("Timestamp is too old"));
 }
 
 #[tokio::test]
@@ -136,7 +135,7 @@ async fn test_secure_hex_decode_invalid() {
     let invalid_hex = "invalid_hex";
     let result = crypto::secure_hex_decode(invalid_hex);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Malformed hex encoding"));
+    assert!(result.unwrap_err().to_string().contains("Malformed hexadecimal encoding"));
 }
 
 #[tokio::test]
@@ -149,7 +148,7 @@ async fn test_secure_hex_decode_empty() {
 
 #[tokio::test]
 async fn test_verify_db_name_secure_valid() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -161,7 +160,7 @@ async fn test_verify_db_name_secure_valid() {
 
 #[tokio::test]
 async fn test_verify_db_name_secure_invalid() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -191,38 +190,35 @@ async fn test_constant_time_eq_different_lengths() {
 
 #[tokio::test]
 async fn test_generate_db_name() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
     
-    let db_name = crypto::generate_db_name(&public_key_hex);
-    assert!(db_name.is_ok());
-    
-    let db_name = db_name.unwrap();
-    assert!(db_name.starts_with("db-"));
+    let db_name = crypto::generate_db_name("testdb", &public_key_hex);
+    assert!(db_name.starts_with("testdb-"));
     assert!(db_name.contains(&public_key_hex));
 }
 
 #[tokio::test]
 async fn test_verify_db_name() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
     
-    let db_name = crypto::generate_db_name(&public_key_hex).unwrap();
+    let db_name = crypto::generate_db_name("testdb", &public_key_hex);
     let result = crypto::verify_db_name(&db_name, &public_key_hex);
     assert!(result.is_ok());
 }
 
 #[tokio::test]
-async fn test_extract_name_part() {
+async fn test_extract_name_from_db() {
     let db_name = "testdb-abcdef123456";
-    let result = crypto::extract_name_part(db_name);
-    assert_eq!(result, "testdb");
+    let result = crypto::extract_name_from_db(db_name);
+    assert_eq!(result, Some("testdb".to_string()));
     
     let simple_name = "simple";
-    let result = crypto::extract_name_part(simple_name);
-    assert_eq!(result, "simple");
+    let result = crypto::extract_name_from_db(simple_name);
+    assert_eq!(result, None); // No dash found, so returns None
 }

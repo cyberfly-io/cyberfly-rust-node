@@ -1,7 +1,6 @@
 use cyberfly_rust_node::sync::{SignedOperation, SyncStore, SyncManager, SyncMessage};
 use cyberfly_rust_node::storage::RedisStorage;
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
 use iroh::EndpointId;
 use tempfile::TempDir;
 use tokio_test;
@@ -35,9 +34,36 @@ fn create_test_operation(signing_key: &SigningKey, db_name: &str, key: &str, val
     }
 }
 
+fn create_test_operation_with_timestamp(signing_key: &SigningKey, db_name: &str, key: &str, value: &str, timestamp: i64) -> SignedOperation {
+    let verifying_key = signing_key.verifying_key();
+    let public_key_hex = hex::encode(verifying_key.as_bytes());
+    let op_id = uuid::Uuid::new_v4().to_string();
+    
+    let message = format!("{}:{}:{}:{}:{}", op_id, timestamp, db_name, key, value);
+    let signature = signing_key.sign(message.as_bytes());
+    
+    SignedOperation {
+        op_id,
+        timestamp,
+        db_name: db_name.to_string(),
+        key: key.to_string(),
+        value: value.to_string(),
+        store_type: "String".to_string(),
+        field: None,
+        score: None,
+        json_path: None,
+        stream_fields: None,
+        ts_timestamp: None,
+        longitude: None,
+        latitude: None,
+        public_key: public_key_hex,
+        signature: hex::encode(signature.to_bytes()),
+    }
+}
+
 #[tokio::test]
 async fn test_signed_operation_verify_valid() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -50,7 +76,7 @@ async fn test_signed_operation_verify_valid() {
 
 #[tokio::test]
 async fn test_signed_operation_verify_invalid_signature() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -66,7 +92,7 @@ async fn test_signed_operation_verify_invalid_signature() {
 
 #[tokio::test]
 async fn test_signed_operation_verify_wrong_db_name() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -78,7 +104,7 @@ async fn test_signed_operation_verify_wrong_db_name() {
 
 #[tokio::test]
 async fn test_signed_operation_short_format() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -118,7 +144,7 @@ async fn test_signed_operation_short_format() {
 #[tokio::test]
 async fn test_sync_store_add_operation() {
     let store = SyncStore::new();
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -140,7 +166,7 @@ async fn test_sync_store_add_operation() {
 #[tokio::test]
 async fn test_sync_store_duplicate_operation() {
     let store = SyncStore::new();
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -166,7 +192,7 @@ async fn test_sync_store_duplicate_operation() {
 #[tokio::test]
 async fn test_sync_store_get_operations_for_db() {
     let store = SyncStore::new();
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -195,7 +221,7 @@ async fn test_sync_store_get_operations_for_db() {
 #[tokio::test]
 async fn test_sync_store_get_operations_since() {
     let store = SyncStore::new();
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -203,29 +229,24 @@ async fn test_sync_store_get_operations_since() {
     
     let base_timestamp = chrono::Utc::now().timestamp_millis();
     
-    // Create operations with different timestamps
-    let mut op1 = create_test_operation(&signing_key, &db_name, "key1", "value1");
-    op1.timestamp = base_timestamp - 1000;
-    
-    let mut op2 = create_test_operation(&signing_key, &db_name, "key2", "value2");
-    op2.timestamp = base_timestamp;
-    
-    let mut op3 = create_test_operation(&signing_key, &db_name, "key3", "value3");
-    op3.timestamp = base_timestamp + 1000;
+    // Create operations with different timestamps using the proper helper function
+    let op1 = create_test_operation_with_timestamp(&signing_key, &db_name, "key1", "value1", base_timestamp - 1000);
+    let op2 = create_test_operation_with_timestamp(&signing_key, &db_name, "key2", "value2", base_timestamp);
+    let op3 = create_test_operation_with_timestamp(&signing_key, &db_name, "key3", "value3", base_timestamp + 1000);
     
     store.add_operation(op1).await.unwrap();
     store.add_operation(op2).await.unwrap();
     store.add_operation(op3).await.unwrap();
     
-    // Get operations since base_timestamp (should get op2 and op3)
+    // Get operations since base_timestamp (should get only op3, as it uses > not >=)
     let recent_ops = store.get_operations_since_for_db_limited(base_timestamp, &db_name, 10).await;
-    assert_eq!(recent_ops.len(), 2);
+    assert_eq!(recent_ops.len(), 1);
 }
 
 #[tokio::test]
 async fn test_sync_store_operation_count() {
     let store = SyncStore::new();
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -248,7 +269,7 @@ async fn test_sync_store_operation_count() {
 #[tokio::test]
 async fn test_sync_store_get_operations_count_for_db() {
     let store = SyncStore::new();
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -274,7 +295,7 @@ async fn test_sync_store_get_operations_count_for_db() {
 #[tokio::test]
 async fn test_sync_store_merge_operations() {
     let store = SyncStore::new();
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
@@ -295,7 +316,7 @@ async fn test_sync_store_merge_operations() {
 
 #[tokio::test]
 async fn test_sync_message_serialization() {
-    let mut csprng = OsRng;
+    let mut csprng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut csprng);
     let verifying_key = signing_key.verifying_key();
     let public_key_hex = hex::encode(verifying_key.as_bytes());
