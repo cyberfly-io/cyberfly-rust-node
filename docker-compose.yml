@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  # Mosquitto MQTT Broker
+  mosquitto:
+    image: cyberfly/cyberfly_mqtt
+    container_name: cyberfly-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"      # MQTT port
+      - "9001:9001"      # WebSocket port
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    networks:
+      - cyberfly-network
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m 'health check' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Cyberfly Rust Node
+  cyberfly-node:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cyberfly-rust-node
+    restart: unless-stopped
+    ports:
+      - "8080:8080"      # GraphQL API port
+      - "8081:8081"      # Additional service port
+      - "11204:11204"    # Iroh QUIC P2P port
+      - "3478:3478"      # Iroh STUN relay port
+    environment:
+      - RUST_LOG=info
+      - MQTT_BROKER_HOST=mosquitto
+      - MQTT_BROKER_PORT=1883
+      - API_HOST=0.0.0.0
+      - API_PORT=8080
+      - RELAY_ENABLED=true
+      - RELAY_HTTP_BIND=0.0.0.0:8081
+      - RELAY_STUN_PORT=3478
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    networks:
+      - cyberfly-network
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  cyberfly-network:
+    driver: bridge
+    name: cyberfly-network

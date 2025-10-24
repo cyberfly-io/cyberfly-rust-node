@@ -1,0 +1,59 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Docker files (except Dockerfile)
+docker-compose.yml
+.dockerignore
+
+# Documentation
+*.md
+docs/
+
+# Environment files
+.env
+.env.local
+.env.example
+
+# Logs
+*.log
+nohup.out
+
+# Test files are not copied to final image
+
+# Client SDK
+client-sdk/
+
+# Scripts
+*.sh
+
+# Mosquitto data (will be mounted as volume)
+mosquitto/data/
+mosquitto/log/
+
+# Data directory
+data/
+
+# Temporary files
+tmp/
+temp/
