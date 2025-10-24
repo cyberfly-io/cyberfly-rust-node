@@ -45,7 +45,7 @@ jobs:
 
   build-and-push:
     needs: changes
-    if: ${{ needs.changes.outputs.docker == 'true' || github.event_name == 'push' && contains(github.ref, 'refs/tags/') }}
+    if: ${{ needs.changes.outputs.docker == 'true' || contains(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -88,6 +88,7 @@ jobs:
 
       # Build for PR (single platform, no push)
       - name: Build Docker image (PR)
+        id: build
         if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v5
         with:
@@ -104,6 +105,7 @@ jobs:
 
       # Build and push for main/master (single platform for speed)
       - name: Build and push Docker image (Development)
+        id: build
         if: github.event_name == 'push' && !contains(github.ref, 'refs/tags/')
         uses: docker/build-push-action@v5
         with:
@@ -122,6 +124,7 @@ jobs:
 
       # Build and push for tags (multi-platform for releases)
       - name: Build and push Docker image (Release)
+        id: build
         if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
         uses: docker/build-push-action@v5
         with:
