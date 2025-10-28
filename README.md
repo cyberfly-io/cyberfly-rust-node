@@ -1,19 +1,19 @@
 # Decentralized Database
 
-A decentralized, peer-to-peer database built with Rust featuring Redis storage, Iroh networking, CRDT-based conflict resolution, GraphQL API, and Ed25519 signature verification.
+A decentralized, peer-to-peer database built with Rust featuring embedded Sled storage, Iroh networking, CRDT-based conflict resolution, GraphQL API, and Ed25519 signature verification.
 
 ## Features
 
 - **🔐 Ed25519 Signature Verification**: All data submissions must be cryptographically signed
 - **🗝️ Database Naming with Public Key**: Databases are named as `<name>-<public_key_hex>` and verified on every operation
-- **🗄️ Redis Storage**: Full support for all Redis data types
-  - **Basic Types**: String, Hash, List, Set, Sorted Set
-  - **JSON**: RedisJSON support for storing and querying JSON documents with JSONPath
-  - **Streams**: Redis Streams for event sourcing and log data
-  - **Time Series**: Time-series data storage (with RedisTimeSeries or sorted set fallback)
-  - **Geospatial**: Location-based data with radius search and distance calculations
+- **🗄️ Embedded Storage**: Dual-storage architecture with no external dependencies
+  - **Sled**: Embedded B-tree database for fast key lookups and indexing
+  - **Iroh Blobs**: Content-addressed storage with Blake3 hashing for immutable data
+  - **Zero Dependencies**: No Redis or external databases required
+  - **ACID Guarantees**: Durable, consistent, crash-safe storage
+  - **Redis-Compatible Types**: String, Hash, List, Set, Sorted Set, JSON, Stream, TimeSeries, Geo
 - **🔍 Advanced Filtering**: Filter data by patterns, ranges, JSONPath, time windows, and geographical radius
-- **� CRDT Sync with Persistence**: Conflict-free replicated data types using Automerge for distributed consensus
+- **🔄 CRDT Sync with Persistence**: Conflict-free replicated data types using Automerge for distributed consensus
   - **Persistent Operation Log**: Operations stored in Iroh content-addressed blobs
   - **Survives Restarts**: Full sync works even after node restarts
   - **Immutable History**: Content-addressed storage with Blake3 hashing
@@ -58,9 +58,14 @@ A decentralized, peer-to-peer database built with Rust featuring Redis storage, 
                                              │  └────┬───┘  │
                                              │       │      │
                                              │  ┌────▼───┐  │
-                                             │  │ Redis  │  │
-                                             │  │Storage │  │
-                                             │  └────────┘  │
+                                             │  │  Sled  │  │
+                                             │  │ Index  │  │
+                                             │  └────┬───┘  │
+                                             │       │      │
+                                             │  ┌────▼───┐  │
+                                             │  │  Iroh  │  │
+                                             │  │ Blobs  │  │
+                                             │  └────┬───┘  │
                                              │       │      │
                                              │  ┌────▼───┐  │
                                              │  │ CRDT   │  │
@@ -68,8 +73,8 @@ A decentralized, peer-to-peer database built with Rust featuring Redis storage, 
                                              │  └────┬───┘  │
                                              │       │      │
                                              │  ┌────▼───┐  │
-                                             │  │libp2p  │  │
-                                             │  │Network │  │
+                                             │  │  Iroh  │  │
+                                             │  │ P2P    │  │
                                              │  └────────┘  │
                                              └──────┬───────┘
                                                     │
@@ -83,27 +88,13 @@ A decentralized, peer-to-peer database built with Rust featuring Redis storage, 
 ## Prerequisites
 
 - **Rust** (1.70+): [Install Rust](https://www.rust-lang.org/tools/install)
-- **Redis** (6.0+): [Install Redis](https://redis.io/docs/getting-started/installation/)
-- **Redis Modules** (Optional but recommended):
-  - **RedisJSON**: For advanced JSON operations - [Install RedisJSON](https://redis.io/docs/stack/json/)
-  - **RedisTimeSeries**: For optimized time-series data - [Install RedisTimeSeries](https://redis.io/docs/stack/timeseries/)
-  - Note: Geospatial and Streams are built into Redis 6.0+
+- **MQTT Broker** (Optional, for IoT integration): [Mosquitto](https://mosquitto.org/)
 
-### Redis Stack (Recommended)
+**That's it!** No external databases required. The node uses:
+- **Sled** for embedded key-value storage (included)
+- **Iroh** for content-addressed blob storage (included)
 
-The easiest way to get all Redis modules is to use [Redis Stack](https://redis.io/docs/stack/):
-
-```bash
-# Using Docker
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack:latest
-
-# Or install Redis Stack directly
-# https://redis.io/docs/stack/get-started/install/
-```
-
-**Fallback Behavior**: The application will work without RedisJSON and RedisTimeSeries modules, but will use alternative storage methods:
-- JSON operations will use raw Redis commands (limited JSONPath support)
-- TimeSeries will fall back to Sorted Sets (less efficient but functional)
+Both are fully embedded and require no separate installation or configuration.
 
 ## Installation
 
@@ -113,9 +104,14 @@ docker run -d --name redis-stack -p 6379:6379 redis/redis-stack:latest
    cd cyberfly-rust-node
    ```
 
-2. **Start Redis**:
+2. **Build the project**:
    ```bash
-   redis-server
+   cargo build --release
+   ```
+
+3. **(Optional) Start MQTT broker for IoT integration**:
+   ```bash
+   mosquitto -c mosquitto.conf
    ```
 
 3. **Build the project**:

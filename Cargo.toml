@@ -65,7 +65,11 @@ md5 = "0.7"
 rand = "0.9"
 regex = "1.10"
 jsonpath_lib = "0.3"
-moka = "0.10"
+moka = { version = "0.10", features = ["future"] }
+
+# Metrics
+prometheus = "0.13"
+lazy_static = "1.4"
 
 [dev-dependencies]
 # Testing framework

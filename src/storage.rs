@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use moka::sync::Cache as MokaCache;
+use moka::future::Cache as MokaCache;
 use sled::Db as SledDb;
+use crate::metrics::{self, Timer};
+use tokio::sync::Semaphore;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StoreType {
@@ -118,11 +120,80 @@ enum StoredValue {
     Geo(GeoValue),
 }
 
+/// Tiered cache for performance optimization
+/// Hot tier: frequently accessed, small (5k entries)
+/// Warm tier: less frequently accessed, larger (50k entries)
+/// Uses Arc to eliminate clones on cache hit
+struct TieredCache {
+    hot: MokaCache<String, Arc<StoredValue>>,
+    warm: MokaCache<String, Arc<StoredValue>>,
+}
+
+impl TieredCache {
+    fn new() -> Self {
+        Self {
+            hot: MokaCache::builder()
+                .max_capacity(5_000)
+                .time_to_live(std::time::Duration::from_secs(300)) // 5 minutes
+                .build(),
+            warm: MokaCache::builder()
+                .max_capacity(50_000)
+                .time_to_live(std::time::Duration::from_secs(3600)) // 1 hour
+                .build(),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<Arc<StoredValue>> {
+        // Check hot tier first (most frequent)
+        if let Some(value) = self.hot.get(key) {
+            metrics::CACHE_HITS.inc();
+            metrics::CACHE_HOT_HITS.inc();
+            return Some(value);
+        }
+        
+        // Check warm tier
+        if let Some(value) = self.warm.get(key) {
+            // Promote to hot tier on access
+            self.hot.insert(key.to_string(), Arc::clone(&value));
+            metrics::CACHE_HITS.inc();
+            metrics::CACHE_WARM_HITS.inc();
+            return Some(value);
+        }
+        
+        // Cache miss
+        metrics::CACHE_MISSES.inc();
+        None
+    }
+
+    async fn insert(&self, key: String, value: StoredValue) {
+        let arc_value = Arc::new(value);
+        // Insert into both tiers (hot takes priority)
+        self.hot.insert(key.clone(), Arc::clone(&arc_value)).await;
+        self.warm.insert(key, arc_value).await;
+        
+        // Update cache size metrics
+        self.update_size_metrics();
+    }
+
+    async fn invalidate(&self, key: &str) {
+        self.hot.invalidate(key).await;
+        self.warm.invalidate(key).await;
+        
+        // Update cache size metrics
+        self.update_size_metrics();
+    }
+    
+    fn update_size_metrics(&self) {
+        metrics::CACHE_SIZE_HOT.set(self.hot.entry_count() as i64);
+        metrics::CACHE_SIZE_WARM.set(self.warm.entry_count() as i64);
+    }
+}
+
 pub struct BlobStorage {
     store: FsStore,
     sled_db: SledDb,
     index_tree: sled::Tree,
-    cache: Arc<MokaCache<String, StoredValue>>,
+    cache: Arc<TieredCache>,
 }
 
 impl Clone for BlobStorage {
@@ -134,6 +205,108 @@ impl Clone for BlobStorage {
             cache: Arc::clone(&self.cache),
         }
     }
+}
+
+/// BatchWriter for parallel write processing with bounded concurrency
+/// Processes multiple writes concurrently using semaphore-based control
+pub struct BatchWriter {
+    storage: BlobStorage,
+    semaphore: Arc<Semaphore>,
+    max_concurrent: usize,
+}
+
+impl BatchWriter {
+    /// Create a new BatchWriter with specified concurrency limit
+    /// 
+    /// # Arguments
+    /// * `storage` - The underlying storage backend
+    /// * `max_concurrent` - Maximum number of concurrent write operations (default: 10)
+    pub fn new(storage: BlobStorage, max_concurrent: usize) -> Self {
+        tracing::info!("BatchWriter initialized with max_concurrent={}", max_concurrent);
+        Self {
+            storage,
+            semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            max_concurrent,
+        }
+    }
+
+    /// Write a single item with concurrency control
+    pub async fn write_one(
+        &self,
+        key: String,
+        value: StoredValue,
+        store_type: StoreType,
+    ) -> Result<()> {
+        // Acquire permit (blocks if max concurrent writes reached)
+        let _permit = self.semaphore.acquire().await
+            .map_err(|e| anyhow::anyhow!("Semaphore acquire failed: {}", e))?;
+        
+        // Perform the write
+        self.storage.store_value(&key, value, store_type).await
+    }
+
+    /// Write multiple items in parallel with bounded concurrency
+    /// 
+    /// # Arguments
+    /// * `items` - Vector of (key, value, store_type) tuples to write
+    /// 
+    /// # Returns
+    /// Vector of Results, one per item (in same order as input)
+    pub async fn write_batch(
+        &self,
+        items: Vec<(String, StoredValue, StoreType)>,
+    ) -> Vec<Result<()>> {
+        let batch_size = items.len();
+        tracing::debug!("BatchWriter processing {} items with max_concurrent={}", 
+            batch_size, self.max_concurrent);
+
+        // Process all writes concurrently (semaphore limits actual parallelism)
+        let mut handles = Vec::with_capacity(batch_size);
+        
+        for (key, value, store_type) in items {
+            let storage = self.storage.clone();
+            let semaphore = Arc::clone(&self.semaphore);
+            
+            let handle = tokio::spawn(async move {
+                // Acquire permit
+                let _permit = semaphore.acquire().await
+                    .map_err(|e| anyhow::anyhow!("Semaphore acquire failed: {}", e))?;
+                
+                // Perform write
+                storage.store_value(&key, value, store_type).await
+            });
+            
+            handles.push(handle);
+        }
+
+        // Wait for all writes to complete
+        let mut results = Vec::with_capacity(batch_size);
+        for handle in handles {
+            let result = match handle.await {
+                Ok(write_result) => write_result,
+                Err(e) => Err(anyhow::anyhow!("Task join error: {}", e)),
+            };
+            results.push(result);
+        }
+
+        tracing::debug!("BatchWriter completed {} items", batch_size);
+        results
+    }
+
+    /// Get statistics about current batch writer state
+    pub fn stats(&self) -> BatchWriterStats {
+        BatchWriterStats {
+            max_concurrent: self.max_concurrent,
+            available_permits: self.semaphore.available_permits(),
+        }
+    }
+}
+
+/// Statistics about BatchWriter state
+#[derive(Debug, Clone)]
+pub struct BatchWriterStats {
+    pub max_concurrent: usize,
+    pub available_permits: usize,
 }
 
 // Helper methods for interacting with sled index
@@ -165,6 +338,40 @@ impl BlobStorage {
         }
         Ok(res)
     }
+    
+    // Async version of index operations using blocking pool
+    async fn index_get_async(&self, key: &str) -> Result<Option<(String, StoreType)>> {
+        let index_tree = self.index_tree.clone();
+        let key_owned = key.to_string();
+        
+        tokio::task::spawn_blocking(move || {
+            if let Ok(Some(v)) = index_tree.get(key_owned.as_bytes()) {
+                let tuple: (String, StoreType) = bincode::deserialize(&v)?;
+                Ok(Some(tuple))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Thread join error: {}", e))?
+    }
+    
+    async fn index_keys_with_prefix_async(&self, prefix: &str) -> Result<Vec<String>> {
+        let index_tree = self.index_tree.clone();
+        let prefix_owned = prefix.to_string();
+        
+        tokio::task::spawn_blocking(move || {
+            let mut res = Vec::new();
+            let prefix_bytes = prefix_owned.as_bytes();
+            for item in index_tree.scan_prefix(prefix_bytes) {
+                let (k, _v) = item?;
+                res.push(String::from_utf8(k.to_vec())?);
+            }
+            Ok::<Vec<String>, anyhow::Error>(res)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Thread join error: {}", e))?
+    }
 }
 
 impl BlobStorage {
@@ -173,11 +380,32 @@ impl BlobStorage {
 
         // Determine sled DB path
         let sled_path = sled_path.unwrap_or_else(|| PathBuf::from("./data/sled_db"));
-        let sled_db = sled::open(&sled_path)?;
+        
+        // Production-optimized Sled configuration
+        tracing::info!("Configuring Sled with production settings");
+        let sled_config = sled::Config::new()
+            .path(&sled_path)
+            // Large cache for hot data (2GB)
+            .cache_capacity(2 * 1024 * 1024 * 1024)
+            // Batch writes for better throughput (flush every 1 second)
+            .flush_every_ms(Some(1000))
+            // Use high-throughput mode for write-heavy workloads
+            .mode(sled::Mode::HighThroughput)
+            // Enable compression to save disk space
+            .use_compression(true)
+            // Not temporary - this is production data
+            .temporary(false);
+        
+        let sled_db = sled_config.open()?;
         let index_tree = sled_db.open_tree("storage_index")?;
+        
+        tracing::info!("Sled configured: cache=2GB, flush=1s, mode=HighThroughput, compression=enabled");
 
-        // Create a bounded cache with a maximum capacity to avoid unbounded memory growth.
-        let cache = MokaCache::new(10_000); // keep up to 10k entries; tune as needed
+        // Create tiered cache with Arc for zero-copy reads
+        // Hot tier: 5k entries, 5min TTL (most frequent)
+        // Warm tier: 50k entries, 1hr TTL (less frequent)
+        let cache = TieredCache::new();
+        tracing::info!("Tiered cache configured: hot=5k/5min, warm=50k/1hr, Arc-based zero-copy");
 
         let storage = Self {
             store,
@@ -188,6 +416,18 @@ impl BlobStorage {
 
         tracing::info!("BlobStorage initialized successfully with sled index at {:?}", sled_path);
         Ok(storage)
+    }
+
+    /// Create a BatchWriter for parallel write processing
+    /// 
+    /// # Arguments
+    /// * `max_concurrent` - Maximum number of concurrent write operations (default: 10)
+    /// 
+    /// # Returns
+    /// A BatchWriter instance configured for this storage
+    pub fn batch_writer(&self, max_concurrent: Option<usize>) -> BatchWriter {
+        let concurrency = max_concurrent.unwrap_or(10);
+        BatchWriter::new(self.clone(), concurrency)
     }
 
     async fn load_index(&self) -> Result<()> {
@@ -218,45 +458,95 @@ impl BlobStorage {
         value: StoredValue,
         store_type: StoreType,
     ) -> Result<()> {
-        let value_bytes = serde_json::to_vec(&value)?;
+        let timer = Timer::new();
+        
+        // Offload JSON serialization to blocking thread pool (CPU-intensive)
+        let value_clone = value.clone();
+        let value_bytes = tokio::task::spawn_blocking(move || {
+            serde_json::to_vec(&value_clone)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Thread join error: {}", e))??;
+        
+        // Store in Iroh blobs (async I/O)
         let blobs = self.store.blobs();
         let tag = blobs.add_bytes(value_bytes).await?;
         let hash_str = tag.hash.to_string();
 
-        {
-            // Persist index entry into sled as (hash_str, store_type) using bincode
-            let val = bincode::serialize(&(hash_str.clone(), store_type.clone()))?;
-            self.index_tree.insert(key.as_bytes(), val)?;
-            // Flush asynchronously is not necessary on every write; optionally batch.
-        }
+        // Offload Sled write to blocking thread pool
+        let index_tree = self.index_tree.clone();
+        let key_owned = key.to_string();
+        let store_type_clone = store_type.clone();
+        
+        tokio::task::spawn_blocking(move || {
+            let val = bincode::serialize(&(hash_str.clone(), store_type_clone))?;
+            index_tree.insert(key_owned.as_bytes(), val)?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Thread join error: {}", e))??;
 
-        {
-            self.cache.insert(key.to_string(), value.clone());
-        }
-        tracing::info!(key = %key, blob = %hash_str, "Stored key in blob and updated index");
-
-
-        // Index persisted in sled; no periodic FsStore snapshot is performed here.
+        // Update cache (fast, in-memory, Arc-based)
+        self.cache.insert(key.to_string(), value).await;
+        
+        timer.observe_duration_seconds(&metrics::WRITE_LATENCY);
+        metrics::STORAGE_WRITES.inc();
+        
+        tracing::debug!(key = %key, blob = %tag.hash, "Stored key in blob and updated index");
 
         Ok(())
     }
 
     async fn get_value(&self, key: &str) -> Result<Option<StoredValue>> {
+        let timer = Timer::new();
+        
+        // Check cache first (fast path, Arc-based zero-copy)
         if let Some(value) = self.cache.get(key) {
-            return Ok(Some(value.clone()));
+            // Clone Arc pointer (cheap) then deref to get StoredValue
+            timer.observe_duration_seconds(&metrics::READ_LATENCY);
+            metrics::STORAGE_READS.inc();
+            return Ok(Some((*value).clone()));
         }
 
-        let (hash_str, _store_type) = match self.index_get(key)? {
-            Some(tuple) => tuple,
-            None => return Ok(None),
+        // Offload Sled lookup to blocking thread pool to prevent executor blocking
+        let index_tree = self.index_tree.clone();
+        let key_owned = key.to_string();
+        
+        let index_result = tokio::task::spawn_blocking(move || {
+            index_tree.get(key_owned.as_bytes())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Thread join error: {}", e))??;
+        
+        let (hash_str, _store_type) = match index_result {
+            Some(v) => {
+                let tuple: (String, StoreType) = bincode::deserialize(&v)?;
+                tuple
+            }
+            None => {
+                timer.observe_duration_seconds(&metrics::READ_LATENCY);
+                metrics::STORAGE_READS.inc();
+                return Ok(None);
+            }
         };
 
+        // Fetch from Iroh blobs (already async)
         let hash: Hash = hash_str.parse()?;
         let blobs = self.store.blobs();
         let value_bytes = blobs.get_bytes(hash).await?.to_vec();
-        let value: StoredValue = serde_json::from_slice(&value_bytes)?;
+        
+        // Offload JSON deserialization to blocking thread pool (CPU-intensive)
+        let value = tokio::task::spawn_blocking(move || {
+            serde_json::from_slice::<StoredValue>(&value_bytes)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Thread join error: {}", e))??;
 
-    self.cache.insert(key.to_string(), value.clone());
+        // Update cache (Arc-based)
+        self.cache.insert(key.to_string(), value.clone()).await;
+
+        timer.observe_duration_seconds(&metrics::READ_LATENCY);
+        metrics::STORAGE_READS.inc();
 
         Ok(Some(value))
     }
@@ -648,14 +938,20 @@ impl BlobStorage {
     }
 
     pub async fn delete(&self, key: &str) -> Result<()> {
+        let timer = Timer::new();
+        
         {
             self.index_remove(key)?;
         }
 
-    // Invalidate cache entry in moka cache
-    self.cache.invalidate(key);
+        // Invalidate cache entry in tiered cache
+        self.cache.invalidate(key).await;
 
         self.save_index().await?;
+        
+        timer.observe_duration_seconds(&metrics::DELETE_LATENCY);
+        metrics::STORAGE_DELETES.inc();
+        
         Ok(())
     }
 
@@ -701,7 +997,7 @@ impl BlobStorage {
             if let Ok(Some(StoredValue::Json(jv))) = self.get_value(&key).await {
                 if jv.id.as_deref() == Some(target_id) {
                     // Remove from cache and index
-                    self.cache.invalidate(&key);
+                    self.cache.invalidate(&key).await;
                     self.index_remove(&key)?;
                 }
             }

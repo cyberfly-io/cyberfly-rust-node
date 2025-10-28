@@ -12,7 +12,7 @@ async function main() {
   // 2. Create client
   console.log('2. Creating CyberFly client...');
   const client = new CyberFlyClient({
-    endpoint: 'http://localhost:8080/graphql',
+    endpoint: 'http://208.73.202.62:8080/graphql',
     keyPair,
     defaultDbName: 'example',
   });

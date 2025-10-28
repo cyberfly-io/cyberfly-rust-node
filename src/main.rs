@@ -6,6 +6,7 @@ mod filters;
 mod graphql;
 mod ipfs;
 mod iroh_network; // Iroh-based networking
+mod metrics; // Performance metrics
 mod mqtt_bridge;
 mod retry; // Enhanced retry and circuit breaker mechanisms
 mod storage;
@@ -29,7 +30,8 @@ async fn start_relay_server(_endpoint: iroh::Endpoint, bind_addr: String) -> Res
     // Create a simple HTTP server for relay handshake
     let app = Router::new()
         .route("/relay", get(relay_handler))
-        .route("/health", get(health_handler));
+        .route("/health", get(health_handler))
+        .route("/metrics", get(metrics_handler));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("🌐 Relay HTTP server listening on {}", addr);
@@ -49,6 +51,11 @@ async fn health_handler() -> &'static str {
     "OK"
 }
 
+/// Prometheus metrics endpoint
+async fn metrics_handler() -> String {
+    metrics::export_metrics()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging with filters
@@ -65,6 +72,10 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("Starting decentralized database node...");
+
+    // Initialize metrics
+    metrics::init_metrics();
+    tracing::info!("Metrics system initialized");
 
     // Load configuration
     let config = config::Config::load()?;
