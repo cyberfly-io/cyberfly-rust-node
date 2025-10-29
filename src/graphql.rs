@@ -224,6 +224,24 @@ pub struct NodeInfo {
 }
 
 #[derive(SimpleObject, Clone)]
+pub struct PerformanceMetrics {
+    pub storage_reads: i64,
+    pub storage_writes: i64,
+    pub storage_deletes: i64,
+    pub cache_hits: i64,
+    pub cache_misses: i64,
+    pub cache_hot_hits: i64,
+    pub cache_warm_hits: i64,
+    pub cache_size_hot: i64,
+    pub cache_size_warm: i64,
+    pub read_latency_avg: f64,
+    pub write_latency_avg: f64,
+    pub delete_latency_avg: f64,
+    pub graphql_requests: i64,
+    pub graphql_errors: i64,
+}
+
+#[derive(SimpleObject, Clone)]
 pub struct PeerInfo {
     pub peer_id: String,
     pub connection_status: String,
@@ -294,9 +312,16 @@ impl QueryRoot {
         db_name: String,
         key: String,
     ) -> Result<QueryResult, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_string"]).inc();
+        
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_string"]).inc();
+                DbError::InternalError(STORAGE_NOT_FOUND.to_string())
+            })?;
 
         let full_key = format!("{}:{}", db_name, key);
         let value = storage.get_string(&full_key).await.map_err(DbError::from)?;
@@ -1317,9 +1342,16 @@ impl QueryRoot {
 
     /// Get node information including peer connections and health
     async fn get_node_info(&self, ctx: &Context<'_>) -> Result<NodeInfo, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_node_info"]).inc();
+        
         let endpoint = ctx
             .data::<iroh::Endpoint>()
-            .map_err(|_| DbError::InternalError("Endpoint not found".to_string()))?;
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_node_info"]).inc();
+                DbError::InternalError("Endpoint not found".to_string())
+            })?;
 
         let node_id = endpoint.id().to_string();
 
@@ -1392,6 +1424,89 @@ impl QueryRoot {
             })
             .collect())
     }
+
+    /// Get performance metrics from Prometheus
+    async fn get_metrics(&self, _ctx: &Context<'_>) -> Result<PerformanceMetrics, DbError> {
+        use crate::metrics::*;
+        use prometheus::proto::MetricFamily;
+        use prometheus::Encoder;
+        
+        // Track this query
+        GRAPHQL_REQUESTS.with_label_values(&["get_metrics"]).inc();
+
+        // Gather all metrics
+        let metric_families = REGISTRY.gather();
+
+        // Helper function to extract counter value
+        let get_counter = |name: &str| -> i64 {
+            metric_families
+                .iter()
+                .find(|mf| mf.get_name() == name)
+                .and_then(|mf| mf.get_metric().first())
+                .map(|m| m.get_counter().get_value() as i64)
+                .unwrap_or(0)
+        };
+
+        // Helper function to extract gauge value
+        let get_gauge = |name: &str| -> i64 {
+            metric_families
+                .iter()
+                .find(|mf| mf.get_name() == name)
+                .and_then(|mf| mf.get_metric().first())
+                .map(|m| m.get_gauge().get_value() as i64)
+                .unwrap_or(0)
+        };
+
+        // Helper function to extract histogram average
+        let get_histogram_avg = |name: &str| -> f64 {
+            metric_families
+                .iter()
+                .find(|mf| mf.get_name() == name)
+                .and_then(|mf| mf.get_metric().first())
+                .map(|m| {
+                    let h = m.get_histogram();
+                    let sum = h.get_sample_sum();
+                    let count = h.get_sample_count();
+                    if count > 0 {
+                        (sum / count as f64) * 1000.0 // Convert to ms
+                    } else {
+                        0.0
+                    }
+                })
+                .unwrap_or(0.0)
+        };
+
+        // Helper to get GraphQL counter by operation
+        let get_graphql_counter = |name: &str| -> i64 {
+            metric_families
+                .iter()
+                .find(|mf| mf.get_name() == name)
+                .map(|mf| {
+                    mf.get_metric()
+                        .iter()
+                        .map(|m| m.get_counter().get_value() as i64)
+                        .sum()
+                })
+                .unwrap_or(0)
+        };
+
+        Ok(PerformanceMetrics {
+            storage_reads: get_counter("storage_reads_total"),
+            storage_writes: get_counter("storage_writes_total"),
+            storage_deletes: get_counter("storage_deletes_total"),
+            cache_hits: get_counter("cache_hits_total"),
+            cache_misses: get_counter("cache_misses_total"),
+            cache_hot_hits: get_counter("cache_hot_hits_total"),
+            cache_warm_hits: get_counter("cache_warm_hits_total"),
+            cache_size_hot: get_gauge("cache_size_hot"),
+            cache_size_warm: get_gauge("cache_size_warm"),
+            read_latency_avg: get_histogram_avg("storage_read_duration_seconds"),
+            write_latency_avg: get_histogram_avg("storage_write_duration_seconds"),
+            delete_latency_avg: get_histogram_avg("storage_delete_duration_seconds"),
+            graphql_requests: get_graphql_counter("graphql_requests_total"),
+            graphql_errors: get_graphql_counter("graphql_errors_total"),
+        })
+    }
 }
 
 pub struct MutationRoot;
@@ -1404,27 +1519,46 @@ impl MutationRoot {
         ctx: &Context<'_>,
         input: SignedData,
     ) -> Result<StorageResult, DbError> {
+        use crate::metrics;
+        
+        // Track GraphQL request
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["submit_data"]).inc();
+        let timer = std::time::Instant::now();
+        
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["submit_data"]).inc();
+                DbError::InternalError(STORAGE_NOT_FOUND.to_string())
+            })?;
 
         // Enhanced database name verification with security checks
         crypto::verify_db_name_secure(&input.db_name, &input.public_key).map_err(|e| {
+            metrics::GRAPHQL_ERRORS.with_label_values(&["submit_data"]).inc();
             DbError::SignatureError(format!("Database name verification failed: {}", e))
         })?;
 
         // Securely decode public key and signature from hex with validation
         let public_key_bytes = crypto::secure_hex_decode(&input.public_key)
-            .map_err(|e| DbError::InvalidData(format!("Invalid public key hex: {}", e)))?;
+            .map_err(|e| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["submit_data"]).inc();
+                DbError::InvalidData(format!("Invalid public key hex: {}", e))
+            })?;
         let signature_bytes = crypto::secure_hex_decode(&input.signature)
-            .map_err(|e| DbError::InvalidData(format!("Invalid signature hex: {}", e)))?;
+            .map_err(|e| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["submit_data"]).inc();
+                DbError::InvalidData(format!("Invalid signature hex: {}", e))
+            })?;
 
         // Create message to verify (db_name:key:value)
         let message = format!("{}:{}:{}", input.db_name, input.key, input.value);
 
         // Verify signature
         crypto::verify_signature(&public_key_bytes, message.as_bytes(), &signature_bytes)
-            .map_err(|e| DbError::SignatureError(e.to_string()))?;
+            .map_err(|e| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["submit_data"]).inc();
+                DbError::SignatureError(e.to_string())
+            })?;
 
         tracing::info!(
             "Signature verified for db: {}, key: {}",
@@ -1635,6 +1769,10 @@ impl MutationRoot {
             // Ignore send errors (no active subscribers)
             let _ = broadcast_tx.send(event);
         }
+
+        // Track successful completion
+        let duration = timer.elapsed().as_secs_f64();
+        metrics::GRAPHQL_LATENCY.with_label_values(&["submit_data"]).observe(duration);
 
         Ok(StorageResult {
             success: true,

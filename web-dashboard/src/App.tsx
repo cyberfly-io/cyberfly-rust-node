@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { LayoutDashboard, Database, Search, HardDrive, Key, Menu, X, Settings, Users, Sun, Moon } from 'lucide-react';
+import { LayoutDashboard, Database, Search, HardDrive, Key, Menu, X, Settings, Users, Sun, Moon, Activity } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import DataSubmit from './components/DataSubmit';
 import DataQuery from './components/DataQuery';
@@ -8,6 +8,7 @@ import BlobManager from './components/BlobManager';
 import { KeyPairManager } from './components/KeyPairManager';
 import { SettingsModal } from './components/Settings';
 import PeerConnection from './components/PeerConnection';
+import Metrics from './components/Metrics';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
 
 const queryClient = new QueryClient({
@@ -19,7 +20,7 @@ const queryClient = new QueryClient({
   },
 });
 
-type Page = 'dashboard' | 'submit' | 'query' | 'blobs' | 'keypair' | 'peers';
+type Page = 'dashboard' | 'submit' | 'query' | 'blobs' | 'keypair' | 'peers' | 'metrics';
 
 function AppContent() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
@@ -29,6 +30,7 @@ function AppContent() {
 
   const navigation = [
     { id: 'dashboard' as Page, name: 'Dashboard', icon: LayoutDashboard },
+    { id: 'metrics' as Page, name: 'Metrics', icon: Activity },
     { id: 'keypair' as Page, name: 'KeyPair', icon: Key },
     { id: 'submit' as Page, name: 'Store Data', icon: Database },
     { id: 'query' as Page, name: 'Query Data', icon: Search },
@@ -40,6 +42,8 @@ function AppContent() {
     switch (currentPage) {
       case 'dashboard':
         return <Dashboard />;
+      case 'metrics':
+        return <Metrics />;
       case 'keypair':
         return <KeyPairManager />;
       case 'submit':
