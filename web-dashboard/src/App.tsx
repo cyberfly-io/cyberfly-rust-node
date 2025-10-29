@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { LayoutDashboard, Database, Search, HardDrive, Key, Menu, X, Settings, Users } from 'lucide-react';
+import { LayoutDashboard, Database, Search, HardDrive, Key, Menu, X, Settings, Users, Sun, Moon } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import DataSubmit from './components/DataSubmit';
 import DataQuery from './components/DataQuery';
@@ -8,6 +8,7 @@ import BlobManager from './components/BlobManager';
 import { KeyPairManager } from './components/KeyPairManager';
 import { SettingsModal } from './components/Settings';
 import PeerConnection from './components/PeerConnection';
+import { ThemeProvider, useTheme } from './context/ThemeContext';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -20,10 +21,11 @@ const queryClient = new QueryClient({
 
 type Page = 'dashboard' | 'submit' | 'query' | 'blobs' | 'keypair' | 'peers';
 
-function App() {
+function AppContent() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const { theme, toggleTheme } = useTheme();
 
   const navigation = [
     { id: 'dashboard' as Page, name: 'Dashboard', icon: LayoutDashboard },
@@ -54,23 +56,22 @@ function App() {
   };
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <div className="min-h-screen bg-gray-100">
-        {/* Sidebar */}
-        <aside
-          className={`fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-lg transform transition-transform duration-200 ease-in-out ${
-            sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-          }`}
-        >
-          <div className="flex items-center justify-between p-4 border-b">
-            <h1 className="text-xl font-bold text-gray-900">CyberFly</h1>
-            <button
-              onClick={() => setSidebarOpen(false)}
-              className="lg:hidden p-2 rounded-md hover:bg-gray-100"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
+    <div className="min-h-screen bg-gray-100 dark:bg-gray-900">
+      {/* Sidebar */}
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 w-64 bg-white dark:bg-gray-800 shadow-lg transform transition-transform duration-200 ease-in-out ${
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        <div className="flex items-center justify-between p-4 border-b dark:border-gray-700">
+          <h1 className="text-xl font-bold text-gray-900 dark:text-white">CyberFly</h1>
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="lg:hidden p-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700"
+          >
+            <X className="w-5 h-5 dark:text-gray-300" />
+          </button>
+        </div>
 
           <nav className="p-4 space-y-2">
             {navigation.map((item) => {
@@ -89,7 +90,7 @@ function App() {
                   className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition ${
                     isActive
                       ? 'bg-blue-600 text-white'
-                      : 'text-gray-700 hover:bg-gray-100'
+                      : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
                   }`}
                 >
                   <Icon className="w-5 h-5" />
@@ -99,8 +100,8 @@ function App() {
             })}
           </nav>
 
-          <div className="absolute bottom-0 left-0 right-0 p-4 border-t bg-gray-50">
-            <div className="text-xs text-gray-600">
+          <div className="absolute bottom-0 left-0 right-0 p-4 border-t bg-gray-50 dark:bg-gray-900 dark:border-gray-700">
+            <div className="text-xs text-gray-600 dark:text-gray-400">
               <p className="font-medium mb-1">Rust Backend</p>
               <p>Version 0.1.0</p>
               <p className="mt-2">Iroh Network + Sled DB</p>
@@ -111,20 +112,33 @@ function App() {
         {/* Mobile menu button */}
         <button
           onClick={() => setSidebarOpen(true)}
-          className={`lg:hidden fixed top-4 left-4 z-40 p-2 bg-white rounded-md shadow-lg ${
+          className={`lg:hidden fixed top-4 left-4 z-40 p-2 bg-white dark:bg-gray-800 rounded-md shadow-lg ${
             sidebarOpen ? 'hidden' : 'block'
           }`}
         >
-          <Menu className="w-6 h-6" />
+          <Menu className="w-6 h-6 dark:text-gray-300" />
+        </button>
+
+        {/* Theme toggle button */}
+        <button
+          onClick={toggleTheme}
+          className="fixed top-4 right-16 z-40 p-2 bg-white dark:bg-gray-800 rounded-md shadow-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition"
+          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        >
+          {theme === 'dark' ? (
+            <Sun className="w-5 h-5 text-gray-700 dark:text-gray-300" />
+          ) : (
+            <Moon className="w-5 h-5 text-gray-700" />
+          )}
         </button>
 
         {/* Settings button */}
         <button
           onClick={() => setSettingsOpen(true)}
-          className="fixed top-4 right-4 z-40 p-2 bg-white rounded-md shadow-lg hover:bg-gray-50 transition"
+          className="fixed top-4 right-4 z-40 p-2 bg-white dark:bg-gray-800 rounded-md shadow-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition"
           title="Settings"
         >
-          <Settings className="w-5 h-5 text-gray-700" />
+          <Settings className="w-5 h-5 text-gray-700 dark:text-gray-300" />
         </button>
 
         {/* Main content */}
@@ -147,7 +161,16 @@ function App() {
           />
         )}
       </div>
-    </QueryClientProvider>
+  );
+}
+
+function App() {
+  return (
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <AppContent />
+      </QueryClientProvider>
+    </ThemeProvider>
   );
 }
 

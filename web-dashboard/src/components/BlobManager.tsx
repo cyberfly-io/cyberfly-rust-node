@@ -55,32 +55,32 @@ export default function BlobManager() {
 
   return (
     <div className="p-6">
-      <h1 className="text-3xl font-bold text-gray-900 mb-6">Blob Storage</h1>
+      <h1 className="text-3xl font-bold text-gray-900 dark:text-white dark:text-gray-100 mb-6">Blob Storage</h1>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Upload Section */}
-        <div className="bg-white rounded-lg shadow p-6">
+        <div className="bg-white dark:bg-gray-800 dark:bg-gray-800 rounded-lg shadow p-6">
           <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
             <Upload className="w-5 h-5" />
             Upload Blob
           </h2>
 
           <div className="space-y-4">
-            <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
+            <div className="border-2 border-dashed border-gray-300 dark:border-gray-600 dark:border-gray-600 rounded-lg p-8 text-center">
               {file ? (
                 <div className="flex items-center justify-center gap-3">
                   <File className="w-8 h-8 text-blue-600" />
                   <div className="text-left">
-                    <p className="font-medium text-gray-900">{file.name}</p>
-                    <p className="text-sm text-gray-500">
+                    <p className="font-medium text-gray-900 dark:text-white dark:text-gray-100">{file.name}</p>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
                       {(file.size / 1024).toFixed(2)} KB
                     </p>
                   </div>
                 </div>
               ) : (
                 <div>
-                  <Upload className="w-12 h-12 text-gray-400 mx-auto mb-3" />
-                  <p className="text-gray-600">Click to select a file</p>
+                  <Upload className="w-12 h-12 text-gray-600 dark:text-gray-400 dark:text-gray-400 mx-auto mb-3" />
+                  <p className="text-gray-600 dark:text-gray-400 dark:text-gray-400">Click to select a file</p>
                 </div>
               )}
               <input
@@ -91,7 +91,7 @@ export default function BlobManager() {
               />
               <label
                 htmlFor="file-upload"
-                className="mt-4 inline-block px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-md cursor-pointer transition"
+                className="mt-4 inline-block px-4 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-md cursor-pointer transition"
               >
                 Choose File
               </label>
@@ -133,7 +133,7 @@ export default function BlobManager() {
         </div>
 
         {/* Download Section */}
-        <div className="bg-white rounded-lg shadow p-6">
+        <div className="bg-white dark:bg-gray-800 dark:bg-gray-800 rounded-lg shadow p-6">
           <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
             <Download className="w-5 h-5" />
             Download Blob
@@ -141,7 +141,7 @@ export default function BlobManager() {
 
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 dark:text-gray-300 mb-2">
                 Blob Hash
               </label>
               <input
@@ -149,7 +149,7 @@ export default function BlobManager() {
                 value={downloadHash}
                 onChange={(e) => setDownloadHash(e.target.value)}
                 placeholder="Enter Iroh blob hash"
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
               />
             </div>
 

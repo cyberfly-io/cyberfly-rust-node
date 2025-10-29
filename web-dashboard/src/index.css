@@ -1,3 +1,48 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Ensure form inputs are always visible */
+input,
+select,
+textarea {
+  color: rgb(17 24 39);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: rgb(107 114 128);
+}
+
+/* Dark mode overrides */
+.dark input,
+.dark select,
+.dark textarea {
+  background-color: rgb(31 41 55) !important;
+  color: rgb(255 255 255) !important;
+  border-color: rgb(75 85 99) !important;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: rgb(156 163 175) !important;
+}
+
+.dark select option {
+  background-color: rgb(31 41 55);
+  color: rgb(255 255 255);
+}
+
+/* Disabled inputs */
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.6;
+}
+
+.dark input:disabled,
+.dark select:disabled,
+.dark textarea:disabled {
+  background-color: rgb(17 24 39) !important;
+  color: rgb(107 114 128) !important;
+}

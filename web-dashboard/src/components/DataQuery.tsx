@@ -36,7 +36,7 @@ export default function DataQuery() {
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-3xl font-bold text-gray-900">Query Data</h1>
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-white dark:text-gray-100">Query Data</h1>
         <button
           onClick={() => dbQuery.refetch()}
           className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition"
@@ -47,11 +47,11 @@ export default function DataQuery() {
       </div>
 
       {/* Query Controls */}
-      <div className="bg-white rounded-lg shadow p-6 mb-6">
+      <div className="bg-white dark:bg-gray-800 dark:bg-gray-800 rounded-lg shadow p-6 mb-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* Database Name */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 dark:text-gray-300 mb-2">
               Database Name
             </label>
             <input
@@ -59,10 +59,10 @@ export default function DataQuery() {
               value={dbName}
               onChange={(e) => setDbName(e.target.value)}
               placeholder={defaultDbName || 'mydb-publickey'}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
             />
             {defaultDbName && !dbName && (
-              <p className="text-xs text-gray-500 mt-1">
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                 Using your keypair's database: {defaultDbName.substring(0, 30)}...
               </p>
             )}
@@ -70,13 +70,13 @@ export default function DataQuery() {
 
           {/* Store Type Filter */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 dark:text-gray-300 mb-2">
               Store Type (optional)
             </label>
             <select
               value={storeType}
               onChange={(e) => setStoreType(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="">All Types</option>
               <option value="String">String</option>
@@ -94,19 +94,19 @@ export default function DataQuery() {
       </div>
 
       {/* Results */}
-      <div className="bg-white rounded-lg shadow">
-        <div className="px-6 py-4 border-b border-gray-200">
+      <div className="bg-white dark:bg-gray-800 dark:bg-gray-800 rounded-lg shadow">
+        <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
           <h2 className="text-lg font-semibold">
             Results ({data.length})
             {dbQuery.isFetching && (
-              <span className="ml-2 text-sm text-gray-500">Loading...</span>
+              <span className="ml-2 text-sm text-gray-500 dark:text-gray-400">Loading...</span>
             )}
           </h2>
         </div>
 
         <div className="divide-y divide-gray-200 max-h-[600px] overflow-y-auto">
           {data.length === 0 ? (
-            <div className="p-8 text-center text-gray-500">
+            <div className="p-8 text-center text-gray-500 dark:text-gray-400">
               {dbQuery.isFetching ? 'Loading...' : 'No data found'}
             </div>
           ) : (
@@ -135,23 +135,23 @@ function DataEntryRow({ entry }: { entry: DataEntry }) {
       TimeSeries: 'bg-red-100 text-red-800',
       Geo: 'bg-teal-100 text-teal-800',
     };
-    return colors[type] || 'bg-gray-100 text-gray-800';
+    return colors[type] || 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200';
   };
 
   return (
-    <div className="p-4 hover:bg-gray-50 transition">
+    <div className="p-4 hover:bg-gray-50 dark:bg-gray-700 dark:bg-gray-700 transition">
       <div className="flex items-start justify-between">
         <div className="flex-1">
           <div className="flex items-center gap-2 mb-2">
             <span className={`px-2 py-1 rounded text-xs font-medium ${getStoreTypeColor(entry.storeType)}`}>
               {entry.storeType}
             </span>
-            <code className="text-sm font-mono text-gray-700">{entry.key}</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 dark:text-gray-300">{entry.key}</code>
           </div>
 
-          <div className="text-sm text-gray-600">
+          <div className="text-sm text-gray-600 dark:text-gray-400 dark:text-gray-400">
             {expanded ? (
-              <pre className="mt-2 p-3 bg-gray-50 rounded overflow-x-auto">
+              <pre className="mt-2 p-3 bg-gray-50 dark:bg-gray-700 dark:bg-gray-700 rounded overflow-x-auto">
                 {JSON.stringify(entry.value, null, 2)}
               </pre>
             ) : (
@@ -169,7 +169,7 @@ function DataEntryRow({ entry }: { entry: DataEntry }) {
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <span className="font-medium">Public Key:</span>
-                  <code className="block mt-1 text-gray-700">{entry.metadata.publicKey}</code>
+                  <code className="block mt-1 text-gray-700 dark:text-gray-300 dark:text-gray-300">{entry.metadata.publicKey}</code>
                 </div>
                 <div>
                   <span className="font-medium">Timestamp:</span>
@@ -182,7 +182,7 @@ function DataEntryRow({ entry }: { entry: DataEntry }) {
 
         <button
           onClick={() => setExpanded(!expanded)}
-          className="ml-4 px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition"
+          className="ml-4 px-3 py-1 text-xs bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-600 rounded transition"
         >
           {expanded ? 'Collapse' : 'Expand'}
         </button>

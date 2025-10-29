@@ -74,7 +74,7 @@ export const KeyPairManager = () => {
   if (isLoading) {
     return (
       <div className="p-6">
-        <div className="bg-white rounded-lg shadow p-6">
+        <div className="bg-white dark:bg-gray-800 dark:bg-gray-800 rounded-lg shadow p-6">
           <div className="flex items-center justify-center">
             <RefreshCw className="animate-spin mr-2" size={20} />
             Loading keypair...
@@ -87,7 +87,7 @@ export const KeyPairManager = () => {
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-3xl font-bold text-gray-900">Ed25519 KeyPair Manager</h1>
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-white dark:text-gray-100">Ed25519 KeyPair Manager</h1>
         {keyPair && (
           <div className="flex gap-2">
             <button
@@ -108,12 +108,12 @@ export const KeyPairManager = () => {
         )}
       </div>
 
-      <div className="bg-white rounded-lg shadow p-6">{!keyPair ? (
+      <div className="bg-white dark:bg-gray-800 dark:bg-gray-800 rounded-lg shadow p-6">{!keyPair ? (
         <div className="text-center py-8">
           <div className="flex justify-center mb-4">
-            <Key className="text-gray-400" size={64} />
+            <Key className="text-gray-600 dark:text-gray-400 dark:text-gray-400" size={64} />
           </div>
-          <p className="text-gray-600 mb-6">
+          <p className="text-gray-600 dark:text-gray-400 dark:text-gray-400 mb-6">
             No keypair found. Generate a new Ed25519 keypair to sign your data submissions.
           </p>
           <div className="flex gap-4 justify-center">
@@ -138,8 +138,8 @@ export const KeyPairManager = () => {
         </div>
       ) : (
         <div className="space-y-4">
-          <div className="bg-gray-50 p-4 rounded-md">
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
+          <div className="bg-gray-50 dark:bg-gray-700 dark:bg-gray-700 p-4 rounded-md">
+            <label className="block text-sm font-semibold text-gray-700 dark:text-gray-300 dark:text-gray-300 mb-2">
               Public Key (Share this)
             </label>
             <div className="flex gap-2">
@@ -147,7 +147,7 @@ export const KeyPairManager = () => {
                 type="text"
                 value={keyPair.publicKey}
                 readOnly
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-md bg-white text-gray-900 font-mono text-sm"
+                className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 dark:bg-gray-800 text-gray-900 dark:text-white dark:text-gray-100 font-mono text-sm"
               />
               <button
                 onClick={() => {
@@ -161,9 +161,9 @@ export const KeyPairManager = () => {
             </div>
           </div>
 
-          <div className="bg-gray-50 p-4 rounded-md">
+          <div className="bg-gray-50 dark:bg-gray-700 dark:bg-gray-700 p-4 rounded-md">
             <div className="flex items-center justify-between mb-2">
-              <label className="block text-sm font-semibold text-gray-700">
+              <label className="block text-sm font-semibold text-gray-700 dark:text-gray-300 dark:text-gray-300">
                 Secret Key (Keep this private!)
               </label>
               <button
@@ -178,7 +178,7 @@ export const KeyPairManager = () => {
                 type={showSecretKey ? 'text' : 'password'}
                 value={keyPair.secretKey}
                 readOnly
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-md bg-white text-gray-900 font-mono text-sm"
+                className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 dark:bg-gray-800 text-gray-900 dark:text-white dark:text-gray-100 font-mono text-sm"
               />
               <button
                 onClick={() => {
