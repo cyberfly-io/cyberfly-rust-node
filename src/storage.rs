@@ -1,3 +1,19 @@
+//! Storage Module
+//! 
+//! This module provides a distributed, content-addressed storage system
+//! using Sled (embedded B-tree DB) + Iroh Blobs (content-addressed storage).
+//!
+//! ## Architecture
+//! - **BlobStorage**: Main storage interface (public API)
+//! - **TieredCache**: Two-tier LRU cache (hot/warm) with Arc for zero-copy reads
+//! - **BatchWriter**: Parallel write processing with semaphore-based concurrency control
+//!
+//! ## Components
+//! - Core storage: Sled index + Iroh blobs
+//! - Caching: Moka async cache with 55k total capacity
+//! - Metrics: Prometheus integration for observability
+//! - Concurrency: Tokio async + blocking thread pools for I/O
+
 use anyhow::Result;
 use async_graphql::SimpleObject;
 use iroh_blobs::store::fs::FsStore;

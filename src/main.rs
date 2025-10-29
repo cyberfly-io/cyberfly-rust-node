@@ -77,6 +77,15 @@ async fn main() -> Result<()> {
     metrics::init_metrics();
     tracing::info!("Metrics system initialized");
 
+    // Initialize ResourceManager and AppState (single source of truth)
+    let resource_manager = std::sync::Arc::new(cyberfly_rust_node::resource_manager::ResourceManager::new(
+        cyberfly_rust_node::resource_manager::ResourceLimits::default(),
+    ));
+    tracing::info!("ResourceManager initialized with defaults");
+
+    let app_state = std::sync::Arc::new(cyberfly_rust_node::state_manager::AppState::new());
+    tracing::info!("AppState (single source of truth) initialized");
+
     // Load configuration
     let config = config::Config::load()?;
 

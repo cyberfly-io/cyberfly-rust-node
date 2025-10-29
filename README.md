@@ -6,6 +6,17 @@ A decentralized, peer-to-peer database built with Rust featuring embedded Sled s
 
 - **🔐 Ed25519 Signature Verification**: All data submissions must be cryptographically signed
 - **🗝️ Database Naming with Public Key**: Databases are named as `<name>-<public_key_hex>` and verified on every operation
+- **⚙️ Resource Management**: Explicit resource limits with automatic enforcement
+  - **Semaphore-based Concurrency**: Configurable operation and connection limits
+  - **RAII Guards**: Automatic cleanup on scope exit
+  - **Real-time Monitoring**: Track utilization and pressure metrics
+  - **Default Limits**: 1000 concurrent operations, 100 peer connections, 4GB memory
+- **📊 State Management**: Centralized state coordination (single source of truth)
+  - **Thread-safe State**: Arc<RwLock> for concurrent access
+  - **Node Lifecycle**: Initialize → Running → Syncing → UnderPressure → ShuttingDown
+  - **Peer Tracking**: Connection status, sync timestamps, operation counts
+  - **Database Stats**: Entry counts, modification times, size tracking
+  - **Immutable Snapshots**: Point-in-time state for observability
 - **🗄️ Embedded Storage**: Dual-storage architecture with no external dependencies
   - **Sled**: Embedded B-tree database for fast key lookups and indexing
   - **Iroh Blobs**: Content-addressed storage with Blake3 hashing for immutable data
@@ -739,20 +750,70 @@ println!("Signature: {}", hex::encode(signature.to_bytes()));
 
 ```
 src/
-├── main.rs           # Application entry point
-├── config.rs         # Configuration management
-├── crypto.rs         # Ed25519 signature verification
-├── storage.rs        # Redis storage operations
-├── crdt.rs           # CRDT merge logic using Automerge
-├── network.rs        # libp2p P2P networking
-├── graphql.rs        # GraphQL API schema and resolvers
-└── error.rs          # Error types
+├── main.rs              # Application entry point
+├── config.rs            # Configuration management
+├── crypto.rs            # Ed25519 signature verification
+├── storage.rs           # Sled + Iroh storage (Redis-like API)
+├── crdt.rs              # CRDT merge logic using Automerge
+├── iroh_network.rs      # Iroh-based P2P networking
+├── ipfs.rs              # IPFS/Iroh file storage
+├── graphql.rs           # GraphQL API schema and resolvers
+├── mqtt_bridge.rs       # MQTT ↔ Gossip bridge
+├── sync.rs              # Sync manager with CRDT operations
+├── metrics.rs           # Prometheus metrics
+├── resource_manager.rs  # Resource limits and concurrency control
+├── state_manager.rs     # Centralized state coordination
+├── error_context.rs     # Enhanced error types with context
+├── error.rs             # Error types
+└── filters.rs           # Advanced filtering (JSON, Geo, TimeSeries)
+```
+
+### Resource Management
+
+ResourceManager and AppState are initialized in `main.rs` for centralized resource control:
+
+```rust
+// Initialize ResourceManager with default limits
+let resource_manager = std::sync::Arc::new(
+    cyberfly_rust_node::resource_manager::ResourceManager::new(
+        cyberfly_rust_node::resource_manager::ResourceLimits::default(),
+    )
+);
+
+// Initialize AppState (single source of truth)
+let app_state = std::sync::Arc::new(
+    cyberfly_rust_node::state_manager::AppState::new()
+);
+```
+
+**Default Resource Limits:**
+- Max concurrent operations: 1000
+- Max peer connections: 100
+- Max memory: 4GB
+- Max database size: 10GB
+- Max cache entries: 100,000
+- Max value size: 10MB
+
+**Usage in resolvers (future work):**
+```rust
+// Acquire operation slot with RAII guard
+let _guard = resource_manager.acquire_operation_slot().await?;
+
+// Update node state
+app_state.set_node_state(NodeState::Running).await;
+
+// Track peer connections
+app_state.add_peer(peer_id, peer_state).await;
+
+// Get snapshot for health checks
+let snapshot = app_state.snapshot().await;
 ```
 
 ### Running Tests
 
 ```bash
 cargo test
+cargo test --test integration_tests  # Resource management integration tests
 ```
 
 ### Logging

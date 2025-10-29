@@ -2,13 +2,16 @@ pub mod config;
 pub mod crdt;
 pub mod crypto;
 pub mod error;
+pub mod error_context;
 pub mod filters;
 pub mod graphql;
 pub mod ipfs;
 pub mod iroh_network;
 pub mod metrics;
 pub mod mqtt_bridge;
+pub mod resource_manager;
 pub mod retry;
+pub mod state_manager;
 pub mod storage;
 pub mod sync;
 

@@ -51,7 +51,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Database
-sled = "0.34"
+sled = { version = "0.34", features = ["compression"] }
 
 # Binary serialization used for storing tuples in sled
 bincode = "1.3"
