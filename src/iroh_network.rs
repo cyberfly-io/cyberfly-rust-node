@@ -237,9 +237,12 @@ impl IrohNetwork {
     pub async fn dial_peer(&self, peer_id: EndpointId) -> anyhow::Result<()> {
         tracing::info!("Attempting to dial peer: {}", peer_id);
         
+        // Use gossip ALPN for peer connections
+        let alpn = iroh_gossip::ALPN;
+        
         // Add the peer to the endpoint's address book
         // The endpoint will attempt to establish a connection
-        let conn = self.endpoint.connect(peer_id, ALPN)
+        let conn = self.endpoint.connect(peer_id, alpn)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect to peer {}: {}", peer_id, e))?;
         

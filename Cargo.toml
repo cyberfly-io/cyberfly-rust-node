@@ -15,7 +15,7 @@ futures = "0.3"
 # GraphQL
 async-graphql = "7.0"
 async-graphql-axum = "7.0"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # Signature verification

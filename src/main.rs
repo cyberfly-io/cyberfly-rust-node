@@ -404,6 +404,7 @@ async fn main() -> Result<()> {
         Some(endpoint_for_graphql), // Pass endpoint instead of wrapped network
         Some(discovered_peers_map), // Pass discovered peers map
         Some(network_for_graphql),   // Pass Arc<Mutex<IrohNetwork>> for dial_peer
+        config.relay_config.relay_url.clone(), // Pass relay URL
         mqtt_tx,
         mqtt_to_gossip_tx,
         mqtt_store,

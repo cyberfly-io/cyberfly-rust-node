@@ -21,6 +21,7 @@ pub struct RelayConfig {
     pub enabled: bool,
     pub http_bind_addr: String,
     pub stun_port: u16,
+    pub relay_url: Option<String>, // Full relay URL for clients to use
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +80,14 @@ impl Config {
             .parse()
             .unwrap_or(3478);
 
+        // Build relay URL if relay is enabled
+        let relay_url = if relay_enabled {
+            let host = env::var("RELAY_PUBLIC_HOST").unwrap_or_else(|_| api_host.clone());
+            Some(format!("iroh-relay://{}:{}", host, relay_stun_port))
+        } else {
+            None
+        };
+
         Ok(Self {
             api_host,
             api_port,
@@ -93,6 +102,7 @@ impl Config {
                 enabled: relay_enabled,
                 http_bind_addr: relay_http_bind,
                 stun_port: relay_stun_port,
+                relay_url,
             },
         })
     }

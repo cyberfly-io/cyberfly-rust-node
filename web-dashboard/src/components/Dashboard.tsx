@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
-import { Activity, Database, Network, HardDrive } from 'lucide-react';
-import { getNodeInfo, getConnectedPeers } from '../api/client';
+import { Activity, Database, Network, HardDrive, Copy, Check, Server, Clock } from 'lucide-react';
+import { getNodeInfo, getDiscoveredPeers } from '../api/client';
+import { useState } from 'react';
 
 export default function Dashboard() {
   const { data: nodeInfo } = useQuery({
@@ -11,7 +12,7 @@ export default function Dashboard() {
 
   const { data: peers = [] } = useQuery({
     queryKey: ['peers'],
-    queryFn: getConnectedPeers,
+    queryFn: getDiscoveredPeers,
     refetchInterval: 5000,
   });
 
@@ -27,48 +28,103 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatCard
-          icon={<Network className="w-6 h-6" />}
-          title="Connected Peers"
-          value={nodeInfo?.connectedPeers || 0}
-          subtitle={`${nodeInfo?.discoveredPeers || 0} discovered`}
-          color="blue"
-        />
-        <StatCard
-          icon={<Activity className="w-6 h-6" />}
-          title="Node ID"
-          value={nodeInfo?.nodeId?.slice(0, 8) || 'N/A'}
-          subtitle="Identifier"
-          color="green"
-        />
-        <StatCard
-          icon={<Database className="w-6 h-6" />}
-          title="Uptime"
-          value={formatUptime(nodeInfo?.uptimeSeconds || 0)}
-          subtitle="Running time"
-          color="purple"
-        />
-        <StatCard
-          icon={<HardDrive className="w-6 h-6" />}
-          title="Active Peers"
-          value={peers.length}
-          subtitle="Currently connected"
-          color="orange"
-        />
-      </div>
+   
 
       {/* Node Info */}
-      <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-4">Node Information</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <InfoRow label="Peer ID" value={nodeInfo?.peerId || 'Loading...'} mono />
-          <InfoRow label="Node ID" value={nodeInfo?.nodeId || 'Loading...'} mono />
-          <InfoRow label="Health" value={nodeInfo?.health || '-'} />
-          <InfoRow label="Uptime" value={formatUptime(nodeInfo?.uptimeSeconds || 0)} />
-          <InfoRow label="Connected Peers" value={nodeInfo?.connectedPeers || 0} />
-          <InfoRow label="Relay URL" value={nodeInfo?.relayUrl || 'None'} />
+      <div className="bg-white rounded-lg shadow-md overflow-hidden">
+        <div className="bg-gradient-to-r from-blue-500 to-blue-600 px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="bg-white/20 p-2 rounded-lg">
+                <Server className="w-6 h-6 text-white" />
+              </div>
+              <div>
+                <h2 className="text-xl font-semibold text-white">Node Information</h2>
+                <p className="text-blue-100 text-sm">Decentralized Network Node</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className={`px-3 py-1 rounded-full text-xs font-medium ${
+                nodeInfo?.health === 'healthy' 
+                  ? 'bg-green-500 text-white' 
+                  : nodeInfo?.health === 'discovering'
+                  ? 'bg-yellow-500 text-white'
+                  : 'bg-red-500 text-white'
+              }`}>
+                {nodeInfo?.health?.toUpperCase() || 'UNKNOWN'}
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div className="p-6 space-y-6">
+          {/* Node IDs Section */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-700 uppercase tracking-wide">
+              <div className="w-1 h-4 bg-blue-500 rounded"></div>
+              Node Identifiers
+            </div>
+            
+            <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg p-4 border border-gray-200">
+              <CopyableField 
+                label="Node ID / Peer ID" 
+                value={nodeInfo?.nodeId || 'Loading...'} 
+                fullWidth
+              />
+            </div>
+          </div>
+
+          {/* Stats Grid */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-700 uppercase tracking-wide">
+              <div className="w-1 h-4 bg-green-500 rounded"></div>
+              Network Statistics
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <StatBox
+                icon={<Network className="w-5 h-5 text-blue-600" />}
+                label="Connected Peers"
+                value={nodeInfo?.connectedPeers || 0}
+                subtitle="Active connections"
+                color="blue"
+              />
+              <StatBox
+                icon={<Activity className="w-5 h-5 text-green-600" />}
+                label="Discovered Peers"
+                value={nodeInfo?.discoveredPeers || 0}
+                subtitle="Network participants"
+                color="green"
+              />
+              <StatBox
+                icon={<Clock className="w-5 h-5 text-purple-600" />}
+                label="Uptime"
+                value={formatUptime(nodeInfo?.uptimeSeconds || 0)}
+                subtitle={`${nodeInfo?.uptimeSeconds || 0} seconds`}
+                color="purple"
+              />
+            </div>
+          </div>
+
+          {/* Additional Info */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-700 uppercase tracking-wide">
+              <div className="w-1 h-4 bg-purple-500 rounded"></div>
+              Configuration
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <InfoBox 
+                label="Relay URL" 
+                value={nodeInfo?.relayUrl || 'Not configured'} 
+                muted={!nodeInfo?.relayUrl}
+              />
+              <InfoBox 
+                label="Protocol Version" 
+                value="Iroh v0.94.0" 
+              />
+            </div>
+          </div>
         </div>
       </div>
 
@@ -128,19 +184,86 @@ function StatCard({ icon, title, value, subtitle, color }: StatCardProps) {
   );
 }
 
-interface InfoRowProps {
+// New components for improved UI
+interface CopyableFieldProps {
   label: string;
-  value: string | number;
-  mono?: boolean;
+  value: string;
+  fullWidth?: boolean;
 }
 
-function InfoRow({ label, value, mono }: InfoRowProps) {
+function CopyableField({ label, value, fullWidth }: CopyableFieldProps) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(value);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   return (
-    <div>
-      <dt className="text-sm font-medium text-gray-500">{label}</dt>
-      <dd className={`mt-1 text-sm text-gray-900 ${mono ? 'font-mono' : ''}`}>
+    <div className={fullWidth ? 'w-full' : ''}>
+      <label className="block text-xs font-medium text-gray-600 mb-2">{label}</label>
+      <div className="flex items-center gap-2">
+        <code className="flex-1 bg-white px-3 py-2 rounded border border-gray-300 text-sm font-mono text-gray-800 overflow-x-auto">
+          {value}
+        </code>
+        <button
+          onClick={handleCopy}
+          className="p-2 hover:bg-gray-200 rounded transition-colors flex-shrink-0"
+          title="Copy to clipboard"
+        >
+          {copied ? (
+            <Check className="w-4 h-4 text-green-600" />
+          ) : (
+            <Copy className="w-4 h-4 text-gray-600" />
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface StatBoxProps {
+  icon: React.ReactNode;
+  label: string;
+  value: string | number;
+  subtitle: string;
+  color: 'blue' | 'green' | 'purple' | 'orange';
+}
+
+function StatBox({ icon, label, value, subtitle, color }: StatBoxProps) {
+  const colors = {
+    blue: 'bg-blue-50 border-blue-200',
+    green: 'bg-green-50 border-green-200',
+    purple: 'bg-purple-50 border-purple-200',
+    orange: 'bg-orange-50 border-orange-200',
+  };
+
+  return (
+    <div className={`${colors[color]} border rounded-lg p-4`}>
+      <div className="flex items-center gap-2 mb-2">
+        {icon}
+        <span className="text-xs font-medium text-gray-600 uppercase tracking-wide">{label}</span>
+      </div>
+      <div className="text-2xl font-bold text-gray-900 mb-1">{value}</div>
+      <div className="text-xs text-gray-500">{subtitle}</div>
+    </div>
+  );
+}
+
+interface InfoBoxProps {
+  label: string;
+  value: string;
+  muted?: boolean;
+}
+
+function InfoBox({ label, value, muted }: InfoBoxProps) {
+  return (
+    <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+      <div className="text-xs font-medium text-gray-600 mb-1">{label}</div>
+      <div className={`text-sm font-medium ${muted ? 'text-gray-400 italic' : 'text-gray-900'}`}>
         {value}
-      </dd>
+      </div>
     </div>
   );
 }

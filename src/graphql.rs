@@ -3,10 +3,11 @@ use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;
 use async_graphql::{Context, InputObject, Object, Schema, SimpleObject, Subscription};
 use async_graphql_axum::{GraphQLProtocol, GraphQLRequest, GraphQLResponse, GraphQLWebSocket};
 use axum::{
-    extract::ws::WebSocketUpgrade,
+    body::Bytes,
+    extract::{ws::WebSocketUpgrade, Multipart, Path},
     http::StatusCode,
-    response::{Html, IntoResponse},
-    routing::get,
+    response::{Html, IntoResponse, Response},
+    routing::{get, post},
     Router,
 };
 use std::sync::Arc;
@@ -22,6 +23,21 @@ use crate::{
     storage::RedisStorage, 
     sync::SyncManager
 };
+
+// Track server start time
+use std::sync::OnceLock;
+static START_TIME: OnceLock<std::time::Instant> = OnceLock::new();
+
+fn get_start_time() -> std::time::Instant {
+    *START_TIME.get_or_init(|| std::time::Instant::now())
+}
+
+// Combined state for API routes
+#[derive(Clone)]
+struct AppState {
+    schema: ApiSchema,
+    ipfs: IpfsStorage,
+}
 
 #[derive(SimpleObject, Clone)]
 pub struct StorageResult {
@@ -1318,7 +1334,9 @@ impl QueryRoot {
         // Note: Iroh doesn't expose peer count directly, so we use discovered_peers as proxy
         let connected_peers = discovered_peers_count; // Peers in DashMap are considered connected
         let discovered_peers = discovered_peers_count;
-        let uptime_seconds = 0u64; // TODO: Track uptime
+        
+        // Calculate uptime
+        let uptime_seconds = get_start_time().elapsed().as_secs();
 
         // Determine health status
         let health = if connected_peers > 0 {
@@ -1329,6 +1347,9 @@ impl QueryRoot {
             "isolated"
         };
 
+        // Get relay URL from context if available
+        let relay_url = ctx.data::<String>().ok().cloned();
+
         Ok(NodeInfo {
             node_id: node_id.clone(),
             peer_id: node_id,
@@ -1336,7 +1357,7 @@ impl QueryRoot {
             connected_peers: connected_peers as i32,
             discovered_peers: discovered_peers as i32,
             uptime_seconds,
-            relay_url: None, // TODO: Get from endpoint config
+            relay_url,
         })
     }
 
@@ -1801,31 +1822,64 @@ impl MutationRoot {
     }
 
     /// Dial a peer by their public key (EndpointId)
+    /// 
+    /// Note: This establishes a direct connection using the gossip ALPN protocol.
+    /// Peers already connected via gossip network don't need manual dialing.
     async fn dial_peer(
         &self,
         ctx: &Context<'_>,
         peer_id: String,
     ) -> Result<StorageResult, DbError> {
-        let iroh_network = ctx
-            .data::<Arc<tokio::sync::Mutex<IrohNetwork>>>()
-            .map_err(|_| DbError::InternalError("Iroh network not found".to_string()))?;
+        // Get the discovered peers map to check if peer is already connected
+        let discovered_peers = ctx
+            .data::<Arc<dashmap::DashMap<iroh::EndpointId, chrono::DateTime<chrono::Utc>>>>()
+            .map_err(|_| DbError::InternalError("Discovered peers map not found".to_string()))?;
 
         // Parse the peer_id string to EndpointId
         let endpoint_id = peer_id
             .parse::<iroh::EndpointId>()
             .map_err(|e| DbError::InternalError(format!("Invalid peer ID format: {}", e)))?;
 
-        // Attempt to dial the peer
-        let mut network = iroh_network.lock().await;
-        network
-            .dial_peer(endpoint_id)
+        // Check if peer is already discovered via gossip
+        if discovered_peers.contains_key(&endpoint_id) {
+            return Ok(StorageResult {
+                success: true,
+                message: format!(
+                    "Peer {} is already connected via gossip network.",
+                    peer_id
+                ),
+            });
+        }
+
+        // Get the endpoint for direct connection attempts
+        let endpoint = ctx
+            .data::<iroh::Endpoint>()
+            .map_err(|_| DbError::InternalError("Endpoint not found".to_string()))?;
+
+        // Use gossip ALPN protocol for peer connections
+        let alpn = iroh_gossip::ALPN;
+
+        // Attempt to connect to the peer using the endpoint directly
+        tracing::info!("GraphQL: Attempting to dial peer via gossip ALPN: {}", peer_id);
+        
+        let conn = endpoint
+            .connect(endpoint_id, alpn)
             .await
-            .map_err(|e| DbError::InternalError(format!("Failed to dial peer: {}", e)))?;
-        drop(network);
+            .map_err(|e| {
+                DbError::InternalError(format!("Failed to connect to peer: {}", e))
+            })?;
+        
+        tracing::info!("GraphQL: Successfully connected to peer: {}", peer_id);
+        
+        // Track the peer in discovered_peers
+        discovered_peers.insert(endpoint_id, chrono::Utc::now());
+        
+        // Keep connection open briefly, then close
+        drop(conn);
 
         Ok(StorageResult {
             success: true,
-            message: format!("Successfully connected to peer: {}", peer_id),
+            message: format!("Successfully connected to peer via gossip: {}", peer_id),
         })
     }
 }
@@ -1979,6 +2033,7 @@ pub async fn create_server(
     endpoint: Option<iroh::Endpoint>, // Pass Endpoint instead of wrapped IrohNetwork
     discovered_peers: Option<Arc<dashmap::DashMap<iroh::EndpointId, chrono::DateTime<chrono::Utc>>>>, // Discovered peers map
     iroh_network: Option<Arc<tokio::sync::Mutex<IrohNetwork>>>, // Pass IrohNetwork for dial_peer
+    relay_url: Option<String>, // Relay URL for node info
     mqtt_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::GossipToMqttMessage>>,
     mqtt_to_gossip_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::MqttToGossipMessage>,
@@ -1997,7 +2052,7 @@ pub async fn create_server(
         .enable_federation() // Enable GraphQL Federation
         .enable_subscription_in_federation() // Enable subscriptions in federation
         .data(storage)
-        .data(ipfs)
+        .data(ipfs.clone()) // Clone ipfs so we can use it for AppState later
         .data(broadcast_tx.clone());
 
     // Add SyncManager if available
@@ -2018,6 +2073,11 @@ pub async fn create_server(
     // Add IrohNetwork if available (for dial_peer)
     if let Some(network) = iroh_network {
         schema_builder = schema_builder.data(network);
+    }
+
+    // Add relay URL if available
+    if let Some(url) = relay_url {
+        schema_builder = schema_builder.data(url);
     }
 
     // Add MQTT components if available
@@ -2044,6 +2104,12 @@ pub async fn create_server(
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // Create combined app state
+    let app_state = AppState {
+        schema: schema.clone(),
+        ipfs: ipfs.clone(),
+    };
+
     let app = Router::new()
         .route("/", get(graphiql_handler))
         .route("/graphql", get(graphql_handler).post(graphql_handler))
@@ -2051,26 +2117,29 @@ pub async fn create_server(
         .route("/playground", get(graphql_playground))
         .route("/schema.graphql", get(graphql_schema_handler))
         .route("/graphql/schema.graphql", get(graphql_schema_handler))
+        // Blob upload and download endpoints
+        .route("/blobs/upload", post(blob_upload_handler))
+        .route("/blobs/{hash}", get(blob_download_handler))
         .layer(cors)
-        .with_state(schema);
+        .with_state(app_state);
 
     Ok(app)
 }
 
 async fn graphql_handler(
-    axum::extract::State(schema): axum::extract::State<ApiSchema>,
+    axum::extract::State(state): axum::extract::State<AppState>,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
-    schema.execute(req.into_inner()).await.into()
+    state.schema.execute(req.into_inner()).await.into()
 }
 
 async fn graphql_subscription_handler(
-    axum::extract::State(schema): axum::extract::State<ApiSchema>,
+    axum::extract::State(state): axum::extract::State<AppState>,
     protocol: GraphQLProtocol,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.protocols(ALL_WEBSOCKET_PROTOCOLS)
-        .on_upgrade(move |socket| GraphQLWebSocket::new(socket, schema.clone(), protocol).serve())
+        .on_upgrade(move |socket| GraphQLWebSocket::new(socket, state.schema.clone(), protocol).serve())
 }
 
 async fn graphql_playground() -> impl axum::response::IntoResponse {
@@ -2150,7 +2219,7 @@ async fn graphiql_handler() -> impl IntoResponse {
 }
 
 async fn graphql_schema_handler(
-    axum::extract::State(schema): axum::extract::State<ApiSchema>,
+    axum::extract::State(state): axum::extract::State<AppState>,
 ) -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -2158,6 +2227,58 @@ async fn graphql_schema_handler(
             axum::http::header::CONTENT_TYPE,
             "text/plain; charset=utf-8",
         )],
-        schema.sdl(),
+        state.schema.sdl(),
     )
+}
+
+// Blob upload handler
+async fn blob_upload_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("Failed to read field: {}", e))
+    })? {
+        let name = field.name().unwrap_or("").to_string();
+        
+        if name == "blob" {
+            let data = field.bytes().await.map_err(|e| {
+                (StatusCode::BAD_REQUEST, format!("Failed to read file data: {}", e))
+            })?;
+            
+            // Store the blob using IPFS
+            let hash = state.ipfs.add_bytes(&data).await.map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store blob: {}", e))
+            })?;
+            
+            tracing::info!("Blob uploaded successfully: {}", hash);
+            
+            return Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "hash": hash }))
+            ));
+        }
+    }
+    
+    Err((StatusCode::BAD_REQUEST, "No blob field found".to_string()))
+}
+
+// Blob download handler
+async fn blob_download_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Path(hash): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    let data = state.ipfs.get_bytes(&hash).await.map_err(|e| {
+        tracing::error!("Failed to retrieve blob {}: {}", hash, e);
+        (StatusCode::NOT_FOUND, format!("Blob not found: {}", e))
+    })?;
+    
+    tracing::info!("Blob downloaded successfully: {}", hash);
+    
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Disposition", format!("attachment; filename=\"{}\"", hash))
+        .body(axum::body::Body::from(data))
+        .unwrap())
 }
