@@ -18,6 +18,9 @@ use rumqttc::QoS;
 
 use crate::mqtt_bridge::{GossipToMqttMessage, MqttToGossipMessage, MessageOrigin};
 
+/// ALPN protocol identifier for peer connections
+const ALPN: &[u8] = b"cyberfly/p2p/0";
+
 /// Network event types
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
@@ -228,6 +231,27 @@ impl IrohNetwork {
     /// Get reference to Iroh endpoint
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
+    }
+
+    /// Dial a peer by their public key (EndpointId)
+    pub async fn dial_peer(&self, peer_id: EndpointId) -> anyhow::Result<()> {
+        tracing::info!("Attempting to dial peer: {}", peer_id);
+        
+        // Add the peer to the endpoint's address book
+        // The endpoint will attempt to establish a connection
+        let conn = self.endpoint.connect(peer_id, ALPN)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to peer {}: {}", peer_id, e))?;
+        
+        tracing::info!("Successfully connected to peer: {}", peer_id);
+        
+        // Track the discovered peer
+        self.discovered_peers.insert(peer_id, chrono::Utc::now());
+        
+        // Keep connection alive by storing it (optional)
+        drop(conn);
+        
+        Ok(())
     }
 
     /// Get reference to gossip protocol

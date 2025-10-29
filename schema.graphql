@@ -113,6 +113,10 @@ type MutationRoot {
 	Request sync from connected peers
 	"""
 	requestSync(peerId: String, fullSync: Boolean): SyncResult!
+	"""
+	Dial a peer by their public key (EndpointId)
+	"""
+	dialPeer(peerId: String!): StorageResult!
 }
 
 type NodeInfo {

@@ -12,8 +12,16 @@ use axum::{
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::{Stream, StreamExt};
+use tower_http::cors::{Any, CorsLayer};
 
-use crate::{crypto, error::{DbError, STORAGE_NOT_FOUND, SYNC_MANAGER_NOT_FOUND, IPFS_STORAGE_NOT_FOUND, ENDPOINT_NOT_FOUND, MQTT_STORE_NOT_FOUND, MQTT_BRIDGE_NOT_AVAILABLE, INVALID_TIMESTAMP, INVALID_TIMESTAMP_FORMAT, MESSAGE_BROADCAST_NOT_FOUND, SYNC_OUTBOUND_NOT_FOUND, DISCOVERED_PEERS_NOT_FOUND}, ipfs::IpfsStorage, storage::RedisStorage, sync::SyncManager};
+use crate::{
+    crypto, 
+    error::{DbError, STORAGE_NOT_FOUND, SYNC_MANAGER_NOT_FOUND, IPFS_STORAGE_NOT_FOUND, ENDPOINT_NOT_FOUND, MQTT_STORE_NOT_FOUND, MQTT_BRIDGE_NOT_AVAILABLE, INVALID_TIMESTAMP, INVALID_TIMESTAMP_FORMAT, MESSAGE_BROADCAST_NOT_FOUND, SYNC_OUTBOUND_NOT_FOUND, DISCOVERED_PEERS_NOT_FOUND}, 
+    ipfs::IpfsStorage, 
+    iroh_network::IrohNetwork,
+    storage::RedisStorage, 
+    sync::SyncManager
+};
 
 #[derive(SimpleObject, Clone)]
 pub struct StorageResult {
@@ -1784,6 +1792,33 @@ impl MutationRoot {
             operations_requested: None, // Will be updated when response comes
         })
     }
+
+    /// Dial a peer by their public key (EndpointId)
+    async fn dial_peer(
+        &self,
+        ctx: &Context<'_>,
+        peer_id: String,
+    ) -> Result<StorageResult, DbError> {
+        let iroh_network = ctx
+            .data::<IrohNetwork>()
+            .map_err(|_| DbError::InternalError("Iroh network not found".to_string()))?;
+
+        // Parse the peer_id string to EndpointId
+        let endpoint_id = peer_id
+            .parse::<iroh::EndpointId>()
+            .map_err(|e| DbError::InternalError(format!("Invalid peer ID format: {}", e)))?;
+
+        // Attempt to dial the peer
+        iroh_network
+            .dial_peer(endpoint_id)
+            .await
+            .map_err(|e| DbError::InternalError(format!("Failed to dial peer: {}", e)))?;
+
+        Ok(StorageResult {
+            success: true,
+            message: format!("Successfully connected to peer: {}", peer_id),
+        })
+    }
 }
 
 pub struct SubscriptionRoot;
@@ -1988,6 +2023,12 @@ pub async fn create_server(
 
     let schema = schema_builder.finish();
 
+    // Configure CORS to allow requests from the frontend
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let app = Router::new()
         .route("/", get(graphiql_handler))
         .route("/graphql", get(graphql_handler).post(graphql_handler))
@@ -1995,6 +2036,7 @@ pub async fn create_server(
         .route("/playground", get(graphql_playground))
         .route("/schema.graphql", get(graphql_schema_handler))
         .route("/graphql/schema.graphql", get(graphql_schema_handler))
+        .layer(cors)
         .with_state(schema);
 
     Ok(app)
