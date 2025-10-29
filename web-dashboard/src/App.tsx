@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { LayoutDashboard, Database, Search, HardDrive, Key, Menu, X, Settings } from 'lucide-react';
+import { LayoutDashboard, Database, Search, HardDrive, Key, Menu, X, Settings, Users } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import DataSubmit from './components/DataSubmit';
 import DataQuery from './components/DataQuery';
 import BlobManager from './components/BlobManager';
 import { KeyPairManager } from './components/KeyPairManager';
 import { SettingsModal } from './components/Settings';
+import PeerConnection from './components/PeerConnection';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -17,7 +18,7 @@ const queryClient = new QueryClient({
   },
 });
 
-type Page = 'dashboard' | 'submit' | 'query' | 'blobs' | 'keypair';
+type Page = 'dashboard' | 'submit' | 'query' | 'blobs' | 'keypair' | 'peers';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
@@ -30,6 +31,7 @@ function App() {
     { id: 'submit' as Page, name: 'Store Data', icon: Database },
     { id: 'query' as Page, name: 'Query Data', icon: Search },
     { id: 'blobs' as Page, name: 'Blob Storage', icon: HardDrive },
+    { id: 'peers' as Page, name: 'Connect Peer', icon: Users },
   ];
 
   const renderPage = () => {
@@ -44,6 +46,8 @@ function App() {
         return <DataQuery />;
       case 'blobs':
         return <BlobManager />;
+      case 'peers':
+        return <PeerConnection />;
       default:
         return <Dashboard />;
     }

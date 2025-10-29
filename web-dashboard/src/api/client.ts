@@ -389,4 +389,27 @@ export async function getMetrics(): Promise<string> {
   return response.data;
 }
 
+// Peer Connection
+export async function dialPeer(peerId: string): Promise<{ success: boolean; message: string }> {
+  const query = `
+    mutation($peerId: String!) {
+      dialPeer(peerId: $peerId) {
+        success
+        message
+      }
+    }
+  `;
+
+  const response = await axiosInstance.post('/graphql', {
+    query,
+    variables: { peerId },
+  });
+
+  if (response.data.errors) {
+    throw new Error(response.data.errors[0].message);
+  }
+
+  return response.data.data.dialPeer;
+}
+
 export default axiosInstance;

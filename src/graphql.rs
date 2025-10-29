@@ -1307,10 +1307,17 @@ impl QueryRoot {
 
         let node_id = endpoint.id().to_string();
 
+        // Get discovered peers count from the DashMap
+        let discovered_peers_count = if let Ok(peers_map) = ctx.data::<std::sync::Arc<dashmap::DashMap<iroh::EndpointId, chrono::DateTime<chrono::Utc>>>>() {
+            peers_map.len()
+        } else {
+            0
+        };
+        
         // Get basic stats from endpoint
-        // Note: Iroh doesn't expose peer count directly, so we return placeholder values
-        let connected_peers = 0; // TODO: Track peers from gossip events
-        let discovered_peers = 0;
+        // Note: Iroh doesn't expose peer count directly, so we use discovered_peers as proxy
+        let connected_peers = discovered_peers_count; // Peers in DashMap are considered connected
+        let discovered_peers = discovered_peers_count;
         let uptime_seconds = 0u64; // TODO: Track uptime
 
         // Determine health status
@@ -1800,7 +1807,7 @@ impl MutationRoot {
         peer_id: String,
     ) -> Result<StorageResult, DbError> {
         let iroh_network = ctx
-            .data::<IrohNetwork>()
+            .data::<Arc<tokio::sync::Mutex<IrohNetwork>>>()
             .map_err(|_| DbError::InternalError("Iroh network not found".to_string()))?;
 
         // Parse the peer_id string to EndpointId
@@ -1809,10 +1816,12 @@ impl MutationRoot {
             .map_err(|e| DbError::InternalError(format!("Invalid peer ID format: {}", e)))?;
 
         // Attempt to dial the peer
-        iroh_network
+        let mut network = iroh_network.lock().await;
+        network
             .dial_peer(endpoint_id)
             .await
             .map_err(|e| DbError::InternalError(format!("Failed to dial peer: {}", e)))?;
+        drop(network);
 
         Ok(StorageResult {
             success: true,
@@ -1969,6 +1978,7 @@ pub async fn create_server(
     sync_manager: Option<SyncManager>,
     endpoint: Option<iroh::Endpoint>, // Pass Endpoint instead of wrapped IrohNetwork
     discovered_peers: Option<Arc<dashmap::DashMap<iroh::EndpointId, chrono::DateTime<chrono::Utc>>>>, // Discovered peers map
+    iroh_network: Option<Arc<tokio::sync::Mutex<IrohNetwork>>>, // Pass IrohNetwork for dial_peer
     mqtt_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::GossipToMqttMessage>>,
     mqtt_to_gossip_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::MqttToGossipMessage>,
@@ -2003,6 +2013,11 @@ pub async fn create_server(
     // Add discovered peers map if available
     if let Some(peers_map) = discovered_peers {
         schema_builder = schema_builder.data(peers_map);
+    }
+    
+    // Add IrohNetwork if available (for dial_peer)
+    if let Some(network) = iroh_network {
+        schema_builder = schema_builder.data(network);
     }
 
     // Add MQTT components if available

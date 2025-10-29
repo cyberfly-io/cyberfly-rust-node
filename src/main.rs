@@ -389,6 +389,10 @@ async fn main() -> Result<()> {
 
     // Get cloneable reference to discovered peers map before moving network
     let discovered_peers_map = network.discovered_peers_map();
+    
+    // Wrap network in Arc so we can share it with GraphQL while still moving it to tokio::spawn
+    let network = Arc::new(tokio::sync::Mutex::new(network));
+    let network_for_graphql = network.clone();
 
     // Create outbound sync channel so other components (GraphQL) can send SyncMessage to network
     let (sync_out_tx, sync_out_rx) = tokio::sync::mpsc::unbounded_channel::<crate::sync::SyncMessage>();
@@ -399,6 +403,7 @@ async fn main() -> Result<()> {
         Some(sync_manager),
         Some(endpoint_for_graphql), // Pass endpoint instead of wrapped network
         Some(discovered_peers_map), // Pass discovered peers map
+        Some(network_for_graphql),   // Pass Arc<Mutex<IrohNetwork>> for dial_peer
         mqtt_tx,
         mqtt_to_gossip_tx,
         mqtt_store,
@@ -410,11 +415,18 @@ async fn main() -> Result<()> {
 
     // Start network event loop
     // Attach sync outbound receiver so GraphQL can submit SyncMessage to be broadcast
-    network.set_sync_outbound_rx(sync_out_rx);
+    let mut network_locked = network.lock().await;
+    network_locked.set_sync_outbound_rx(sync_out_rx);
+    drop(network_locked);
 
     tokio::spawn(async move {
-        if let Err(e) = network.run().await {
-            tracing::error!("Network error: {}", e);
+        loop {
+            let mut net = network.lock().await;
+            if let Err(e) = net.run().await {
+                tracing::error!("Network error: {}", e);
+            }
+            drop(net);
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
     });
 
