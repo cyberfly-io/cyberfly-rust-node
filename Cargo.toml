@@ -82,6 +82,7 @@ serial_test = "3.0"
 opt-level = 0          # No optimization (fastest compile)
 debug = true           # Keep debug info
 incremental = true     # Enable incremental compilation (default)
+codegen-units = 256    # More parallelism for faster compilation (slight runtime cost)
 
 [profile.test]
 # Faster test compilation
