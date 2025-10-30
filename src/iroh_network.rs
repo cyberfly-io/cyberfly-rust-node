@@ -848,10 +848,32 @@ impl IrohNetwork {
         };
         let payload = serde_json::to_vec(&sync_msg)?;
         let len = payload.len();
+        
+        // Log operation details if it's an operation message
+        match &sync_msg {
+            crate::sync::SyncMessage::Operation { operation } => {
+                tracing::info!(
+                    "📤 Broadcasting operation {} (db: {}, key: {}, type: {}, {} bytes)",
+                    operation.op_id, operation.db_name, operation.key, operation.store_type, len
+                );
+            }
+            crate::sync::SyncMessage::SyncRequest { requester, since_timestamp } => {
+                tracing::info!(
+                    "📤 Broadcasting sync request from {} (since: {:?}, {} bytes)",
+                    requester, since_timestamp, len
+                );
+            }
+            crate::sync::SyncMessage::SyncResponse { requester, operations, .. } => {
+                tracing::info!(
+                    "📤 Broadcasting sync response to {} ({} operations, {} bytes)",
+                    requester, operations.len(), len
+                );
+            }
+        }
+        
         sender.lock().await.broadcast(payload.into()).await?;
 
-        // Use info to surface broadcasts in default logs; include payload length
-        tracing::info!("Broadcast sync message ({} bytes)", len);
+        tracing::debug!("✓ Broadcast complete");
         Ok(())
     }
     

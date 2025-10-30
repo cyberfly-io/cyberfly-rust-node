@@ -702,19 +702,57 @@ impl SyncManager {
                 Ok(None)
             }
             SyncMessage::Operation { operation } => {
-                tracing::info!("Received operation {} from {}", operation.op_id, from_peer);
+                tracing::info!(
+                    "📥 Received operation {} from {} (db: {}, key: {}, type: {})",
+                    operation.op_id, from_peer, operation.db_name, operation.key, operation.store_type
+                );
+                
+                // First verify the operation signature
+                match operation.verify() {
+                    Ok(_) => {
+                        tracing::debug!(op_id = %operation.op_id, "✓ Signature verified");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            op_id = %operation.op_id,
+                            "❌ Signature verification failed: {} - Rejecting operation",
+                            e
+                        );
+                        return Ok(None);
+                    }
+                }
+                
                 match self.sync_store.add_operation(operation.clone()).await {
                     Ok(true) => {
-                        tracing::info!(op_id = %operation.op_id, "Operation accepted into SyncStore, applying to storage");
+                        tracing::info!(
+                            op_id = %operation.op_id,
+                            "✓ Operation accepted into SyncStore, applying to storage"
+                        );
                         if let Err(e) = self.apply_operation_to_storage(&operation).await {
-                            tracing::error!(op_id = %operation.op_id, "Failed to apply operation to storage: {}", e);
+                            tracing::error!(
+                                op_id = %operation.op_id,
+                                "❌ Failed to apply operation to storage: {}",
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                op_id = %operation.op_id,
+                                "✓ Operation successfully applied to storage"
+                            );
                         }
                     }
                     Ok(false) => {
-                        tracing::info!(op_id = %operation.op_id, "Operation rejected by SyncStore (duplicate or older)");
+                        tracing::debug!(
+                            op_id = %operation.op_id,
+                            "⏭️  Operation rejected by SyncStore (duplicate or older)"
+                        );
                     }
                     Err(e) => {
-                        tracing::warn!(op_id = %operation.op_id, "Failed to add operation to SyncStore: {}", e);
+                        tracing::error!(
+                            op_id = %operation.op_id,
+                            "❌ Failed to add operation to SyncStore: {}",
+                            e
+                        );
                     }
                 }
                 Ok(None)
