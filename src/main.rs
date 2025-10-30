@@ -322,20 +322,20 @@ async fn main() -> Result<()> {
         // Forward MQTT messages to broadcast channel for subscriptions
         tokio::spawn(async move {
             let mut last_processed_timestamp = chrono::Utc::now().timestamp();
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
-            // Track message_ids we've already broadcast to avoid sending duplicates
-            let mut seen_message_ids: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(200)); // Reduced from 100ms
+            
+            // Use a bounded VecDeque instead of unbounded HashSet to prevent memory growth
+            let mut seen_message_ids: std::collections::VecDeque<String> = 
+                std::collections::VecDeque::with_capacity(1000);
+            const MAX_SEEN_IDS: usize = 1000;
 
             loop {
                 interval.tick().await;
 
-                // Get all messages since last processed timestamp
-                let all_messages = mqtt_store_clone.get_messages(None, None).await;
-                let new_messages: Vec<_> = all_messages
-                    .into_iter()
-                    .filter(|msg| msg.timestamp > last_processed_timestamp)
-                    .collect();
+                // OPTIMIZED: Use new get_messages_since to filter at source
+                let new_messages = mqtt_store_clone
+                    .get_messages_since(last_processed_timestamp, None, None)
+                    .await;
 
                 // Update last processed timestamp
                 if let Some(latest_msg) = new_messages.last() {
@@ -343,21 +343,25 @@ async fn main() -> Result<()> {
                 }
 
                 // Send new messages to broadcast channel, deduping by message_id
-                for msg in new_messages {
+                for msg in new_messages.into_iter() {  // Use into_iter to consume and avoid clones
                     // If message_id exists and we've already sent it, skip
                     if !msg.message_id.is_empty() && seen_message_ids.contains(&msg.message_id) {
                         continue;
                     }
 
                     let event = graphql::MessageEvent {
-                        topic: msg.topic.clone(),
-                        payload: msg.payload.clone(),
+                        topic: msg.topic,      // Move instead of clone
+                        payload: msg.payload,  // Move instead of clone
                         timestamp: msg.timestamp,
                     };
 
                     if broadcast_clone.send(event).is_ok() {
                         if !msg.message_id.is_empty() {
-                            seen_message_ids.insert(msg.message_id.clone());
+                            // Bounded queue: remove oldest if at capacity
+                            if seen_message_ids.len() >= MAX_SEEN_IDS {
+                                seen_message_ids.pop_front();
+                            }
+                            seen_message_ids.push_back(msg.message_id);
                         }
                     }
                 }

@@ -404,6 +404,27 @@ impl MqttMessageStore {
         filtered.into_iter().rev().take(limit).collect()
     }
     
+    /// Get messages since a specific timestamp (optimized for polling)
+    pub async fn get_messages_since(&self, since_timestamp: i64, topic_filter: Option<String>, limit: Option<usize>) -> Vec<MqttMessage> {
+        let messages = self.messages.read().await;
+        
+        // Filter by timestamp first (most selective)
+        let filtered: Vec<MqttMessage> = messages.iter()
+            .filter(|m| m.timestamp > since_timestamp)
+            .filter(|m| {
+                if let Some(ref filter) = topic_filter {
+                    m.topic.contains(filter)
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+        
+        let limit = limit.unwrap_or(100);
+        filtered.into_iter().rev().take(limit).collect()
+    }
+    
     pub async fn clear(&self) {
         let mut messages = self.messages.write().await;
         messages.clear();
