@@ -17,37 +17,32 @@ export default function Dashboard() {
   });
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">CyberFly Node Dashboard</h1>
-        <div className="flex items-center gap-2">
-          <div className={`w-3 h-3 rounded-full animate-pulse ${
-            nodeInfo?.health === 'healthy' ? 'bg-green-500' : 'bg-yellow-500'
-          }`}></div>
-          <span className="text-sm text-gray-600 dark:text-gray-400">{nodeInfo?.health || 'Unknown'}</span>
-        </div>
+    <div className="p-6 space-y-8">
+      <div>
+        <h1 className="text-4xl font-bold gradient-text-blue mb-2">CyberFly Node Dashboard</h1>
+        <p className="text-gray-600 dark:text-gray-400 text-lg">Monitor your decentralized network node</p>
       </div>
 
       {/* Node Info */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
-        <div className="bg-gradient-to-r from-blue-500 to-blue-600 px-6 py-4">
+      <div className="glass dark:glass-dark rounded-2xl shadow-2xl overflow-hidden card-hover backdrop-blur-xl border border-white/20 dark:border-gray-700/50">
+        <div className="bg-gradient-to-r from-blue-500 via-blue-600 to-purple-600 px-8 py-6 animate-gradient">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="bg-white/20 p-2 rounded-lg">
-                <Server className="w-6 h-6 text-white" />
+            <div className="flex items-center gap-4">
+              <div className="bg-white/20 p-3 rounded-xl shadow-lg backdrop-blur-sm">
+                <Server className="w-8 h-8 text-white" />
               </div>
               <div>
-                <h2 className="text-xl font-semibold text-white">Node Information</h2>
-                <p className="text-blue-100 text-sm">Decentralized Network Node</p>
+                <h2 className="text-2xl font-bold text-white">Node Information</h2>
+                <p className="text-blue-100 text-base">Decentralized Network Node</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <div className={`px-3 py-1 rounded-full text-xs font-medium ${
+              <div className={`px-4 py-2 rounded-xl text-sm font-bold shadow-lg backdrop-blur-sm ${
                 nodeInfo?.health === 'healthy' 
-                  ? 'bg-green-500 text-white' 
+                  ? 'bg-green-500/90 text-white' 
                   : nodeInfo?.health === 'discovering'
-                  ? 'bg-yellow-500 text-white'
-                  : 'bg-red-500 text-white'
+                  ? 'bg-yellow-500/90 text-white'
+                  : 'bg-red-500/90 text-white'
               }`}>
                 {nodeInfo?.health?.toUpperCase() || 'UNKNOWN'}
               </div>
@@ -55,7 +50,7 @@ export default function Dashboard() {
           </div>
         </div>
         
-        <div className="p-6 space-y-6">
+        <div className="p-6 space-y-6 backdrop-blur-xl">
           {/* Node IDs Section */}
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
@@ -63,7 +58,7 @@ export default function Dashboard() {
               Node Identifiers
             </div>
             
-            <div className="bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-800 dark:to-gray-700 rounded-lg p-4 border border-gray-200 dark:border-gray-600">
+            <div className="glass dark:glass-dark rounded-lg p-4 backdrop-blur-md border border-white/10 dark:border-gray-600/30">
               <CopyableField 
                 label="Node ID / Peer ID" 
                 value={nodeInfo?.nodeId || 'Loading...'} 
@@ -127,8 +122,11 @@ export default function Dashboard() {
       </div>
 
       {/* Connected Peers */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Connected Peers ({peers.length})</h2>
+      <div className="glass dark:glass-dark rounded-2xl shadow-2xl p-6 backdrop-blur-xl border border-white/20 dark:border-gray-700/50">
+        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+          <Network className="w-5 h-5 text-blue-500" />
+          Connected Peers ({peers.length})
+        </h2>
         <div className="space-y-2 max-h-96 overflow-y-auto">
           {peers.length === 0 ? (
             <p className="text-gray-500 dark:text-gray-400 text-center py-8">No peers connected</p>
@@ -136,10 +134,10 @@ export default function Dashboard() {
             peers.map((peer) => (
               <div
                 key={peer.peerId}
-                className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition"
+                className="flex items-center justify-between p-3 glass dark:glass-dark rounded-lg hover:bg-white/30 dark:hover:bg-gray-700/50 transition backdrop-blur-md border border-white/10 dark:border-gray-600/30"
               >
                 <div className="flex items-center gap-3">
-                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse shadow-lg shadow-green-500/50"></div>
                   <code className="text-sm font-mono text-gray-700 dark:text-gray-300">{peer.peerId}</code>
                 </div>
                 <span className="text-xs text-gray-500 dark:text-gray-400">
@@ -231,16 +229,18 @@ interface StatBoxProps {
 
 function StatBox({ icon, label, value, subtitle, color }: StatBoxProps) {
   const colors = {
-    blue: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800',
-    green: 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800',
-    purple: 'bg-purple-50 dark:bg-purple-900/20 border-purple-200 dark:border-purple-800',
-    orange: 'bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800',
+    blue: 'glass dark:glass-dark border-blue-200/50 dark:border-blue-700/30 hover:border-blue-300 dark:hover:border-blue-600',
+    green: 'glass dark:glass-dark border-green-200/50 dark:border-green-700/30 hover:border-green-300 dark:hover:border-green-600',
+    purple: 'glass dark:glass-dark border-purple-200/50 dark:border-purple-700/30 hover:border-purple-300 dark:hover:border-purple-600',
+    orange: 'glass dark:glass-dark border-orange-200/50 dark:border-orange-700/30 hover:border-orange-300 dark:hover:border-orange-600',
   };
 
   return (
-    <div className={`${colors[color]} border rounded-lg p-4`}>
+    <div className={`${colors[color]} border rounded-xl p-4 backdrop-blur-md transition-all duration-300 hover:shadow-lg`}>
       <div className="flex items-center gap-2 mb-2">
-        {icon}
+        <div className="p-2 bg-white/30 dark:bg-gray-700/30 rounded-lg backdrop-blur-sm">
+          {icon}
+        </div>
         <span className="text-xs font-medium text-gray-600 dark:text-gray-400 uppercase tracking-wide">{label}</span>
       </div>
       <div className="text-2xl font-bold text-gray-900 dark:text-white mb-1">{value}</div>
@@ -257,7 +257,7 @@ interface InfoBoxProps {
 
 function InfoBox({ label, value, muted }: InfoBoxProps) {
   return (
-    <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 border border-gray-200 dark:border-gray-600">
+    <div className="glass dark:glass-dark rounded-xl p-4 backdrop-blur-md border border-white/20 dark:border-gray-600/30 hover:border-white/30 dark:hover:border-gray-500/40 transition-all duration-300">
       <div className="text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">{label}</div>
       <div className={`text-sm font-medium ${muted ? 'text-gray-500 dark:text-gray-400 italic' : 'text-gray-900 dark:text-white'}`}>
         {value}

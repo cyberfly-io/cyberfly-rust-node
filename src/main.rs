@@ -9,6 +9,7 @@ mod iroh_network; // Iroh-based networking
 mod kadena; // Kadena blockchain integration
 mod metrics; // Performance metrics
 mod mqtt_bridge;
+mod node_region; // Node region detection
 mod retry; // Enhanced retry and circuit breaker mechanisms
 mod storage;
 mod sync; // Data synchronization with CRDT
@@ -73,6 +74,9 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("Starting decentralized database node...");
+
+    // Fetch and set node region on startup (same as JS implementation)
+    node_region::fetch_and_set_node_region().await;
 
     // Initialize metrics
     metrics::init_metrics();

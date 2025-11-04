@@ -35,7 +35,7 @@ export default function DataQuery() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-6 pr-48">
         <h1 className="text-3xl font-bold text-gray-900 dark:text-white dark:text-gray-100">Query Data</h1>
         <button
           onClick={() => dbQuery.refetch()}

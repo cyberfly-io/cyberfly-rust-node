@@ -12,6 +12,7 @@ pub mod iroh_network;
 pub mod kadena;
 pub mod metrics;
 pub mod mqtt_bridge;
+pub mod node_region;
 pub mod resource_manager;
 pub mod retry;
 pub mod state_manager;

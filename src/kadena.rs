@@ -69,7 +69,9 @@ pub struct NodeStatus {
 /// Reward calculation result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RewardInfo {
-    pub days: i64,
+    // Some contract responses return fractional days (e.g. 0.1),
+    // so accept days as f64 to be tolerant during deserialization.
+    pub days: f64,
     pub reward: f64,
 }
 
@@ -504,7 +506,7 @@ impl NodeRegistry {
 
         // Check if rewards are claimable
         if let Some(reward_info) = self.calculate_rewards(peer_id).await? {
-            if reward_info.days >= 1 && reward_info.reward > 0.0 {
+            if reward_info.days >= 1.0 && reward_info.reward > 0.0 {
                 info!("Rewards available: {} days, {} tokens", reward_info.days, reward_info.reward);
                 self.claim_reward(peer_id).await?;
             } else {

@@ -160,7 +160,7 @@ export default function Metrics() {
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between pr-48">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Performance Metrics</h1>
           <p className="text-gray-600 dark:text-gray-400 mt-1">Real-time system performance monitoring</p>

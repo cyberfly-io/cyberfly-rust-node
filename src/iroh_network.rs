@@ -484,6 +484,7 @@ impl IrohNetwork {
                                 &event_tx,
                                 &libp2p_to_mqtt_tx,
                                 &discovered_peers,
+                                &data_sender_clone,
                             ).await {
                                 tracing::error!("Error handling data gossip event: {}", e);
                             }
@@ -509,6 +510,7 @@ impl IrohNetwork {
                                 &event_tx,
                                 &libp2p_to_mqtt_tx,
                                 &discovered_peers,
+                                &data_sender_clone,
                             ).await {
                                 tracing::error!("Error handling discovery gossip event: {}", e);
                             }
@@ -643,6 +645,7 @@ impl IrohNetwork {
         event_tx: &mpsc::UnboundedSender<NetworkEvent>,
         libp2p_to_mqtt_tx: &Option<mpsc::UnboundedSender<GossipToMqttMessage>>,
         discovered_peers: &Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
+        data_sender: &Arc<Mutex<GossipSender>>,
     ) -> Result<()> {
         match event {
             GossipEvent::Received(msg) => {
@@ -671,6 +674,23 @@ impl IrohNetwork {
                         Ok(gossip_msg) => {
                             tracing::info!("📨 Received gossip message - origin: {}, topic: {:?}, from: {}", 
                                 gossip_msg.origin, gossip_msg.topic, from);
+                            
+                            // Check if this is a process latency request
+                            if let Some(ref topic) = gossip_msg.topic {
+                                if topic == "process-latency-request" {
+                                    tracing::info!("⏱️  Received process-latency-request");
+                                    // Handle process latency request in a separate task
+                                    let data = gossip_msg.payload.clone();
+                                    let sender = data_sender.clone();
+                                    let node_id_str = node_id.to_string();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = Self::handle_process_latency_request(data, sender, node_id_str).await {
+                                            tracing::error!("Failed to handle process latency request: {}", e);
+                                        }
+                                    });
+                                    return Ok(());
+                                }
+                            }
                             
                             // Check if this is a bridge message with metadata
                             let actual_data = gossip_msg.payload;
@@ -880,6 +900,134 @@ impl IrohNetwork {
     /// Get sync sender for external use
     pub fn sync_sender(&self) -> Option<Arc<Mutex<GossipSender>>> {
         self.sync_sender.clone()
+    }
+
+    /// Handle process latency request
+    async fn handle_process_latency_request(
+        data: Vec<u8>,
+        data_sender: Arc<Mutex<GossipSender>>,
+        node_id: String,
+    ) -> Result<()> {
+        use std::time::Instant;
+        
+        // Parse the request
+        #[derive(serde::Deserialize)]
+        struct LatencyRequest {
+            request_id: String,
+            url: String,
+            method: Option<String>,
+            #[serde(default)]
+            headers: std::collections::HashMap<String, String>,
+            body: Option<String>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct LatencyResponse {
+            request_id: String,
+            status: u16,
+            #[serde(rename = "statusText")]
+            status_text: String,
+            latency: f64,
+            #[serde(rename = "nodeRegion")]
+            node_region: Option<String>,
+            #[serde(rename = "nodeId")]
+            node_id: String,
+            error: Option<String>,
+        }
+
+        let request: LatencyRequest = match serde_json::from_slice(&data) {
+            Ok(req) => req,
+            Err(e) => {
+                tracing::error!("Failed to parse latency request: {}", e);
+                return Err(anyhow::anyhow!("Invalid request format: {}", e));
+            }
+        };
+
+        tracing::info!("⏱️  Processing latency request {} for URL: {}", request.request_id, request.url);
+
+        // Build HTTP client request
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+
+        let method = request.method.as_deref().unwrap_or("GET").to_uppercase();
+        let method = match method.as_str() {
+            "GET" => reqwest::Method::GET,
+            "POST" => reqwest::Method::POST,
+            "PUT" => reqwest::Method::PUT,
+            "PATCH" => reqwest::Method::PATCH,
+            "DELETE" => reqwest::Method::DELETE,
+            _ => reqwest::Method::GET,
+        };
+
+        let mut req_builder = client.request(method, &request.url);
+        
+        // Add headers
+        for (key, value) in request.headers {
+            req_builder = req_builder.header(&key, &value);
+        }
+
+        // Add body if present
+        if let Some(body) = request.body {
+            req_builder = req_builder.body(body);
+        }
+
+        // Measure latency
+        let start_time = Instant::now();
+        let result = req_builder.send().await;
+        let latency_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+
+        let response = match result {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let status_text = resp.status().canonical_reason().unwrap_or("Unknown").to_string();
+                
+                // Consume response body to complete the request
+                let _ = resp.text().await;
+                
+                tracing::info!("✅ Latency request {} completed: {} ms (status: {})", 
+                    request.request_id, latency_ms, status);
+
+                LatencyResponse {
+                    request_id: request.request_id.clone(),
+                    status,
+                    status_text,
+                    latency: latency_ms,
+                    node_region: Some(super::node_region::get_node_region()),
+                    node_id: node_id.clone(),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                tracing::error!("❌ Latency request {} failed: {}", request.request_id, e);
+                
+                LatencyResponse {
+                    request_id: request.request_id.clone(),
+                    status: 0,
+                    status_text: "Error".to_string(),
+                    latency: latency_ms,
+                    node_region: Some(super::node_region::get_node_region()),
+                    node_id: node_id.clone(),
+                    error: Some(e.to_string()),
+                }
+            }
+        };
+
+        // Publish response to process-latency-response topic
+        let response_msg = GossipMessage {
+            origin: "local".to_string(),
+            broker: node_id.clone(),
+            timestamp: chrono::Utc::now().timestamp(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            topic: Some("process-latency-response".to_string()),
+            payload: serde_json::to_vec(&response)?,
+        };
+
+        let payload = serde_json::to_vec(&response_msg)?;
+        data_sender.lock().await.broadcast(payload.into()).await?;
+        
+        tracing::info!("📤 Published latency response for request {}", request.request_id);
+        Ok(())
     }
 
     /// Get event receiver (for compatibility with old API)
