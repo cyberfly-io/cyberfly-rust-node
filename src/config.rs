@@ -9,6 +9,7 @@ pub struct Config {
     pub iroh_config: IrohConfig,
     pub mqtt_config: MqttConfig,
     pub relay_config: RelayConfig,
+    pub kadena_config: Option<KadenaConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +31,48 @@ pub struct MqttConfig {
     pub broker_host: String,
     pub broker_port: u16,
     pub client_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KadenaConfig {
+    pub account: String,
+    pub secret_key: String,
+    pub network_id: String, // "mainnet01" or "testnet04"
+    pub chain_id: String,   // "1"
+    pub api_host: String,   // API endpoint URL
+}
+
+impl KadenaConfig {
+    /// Derive the Ed25519 public key from the private key (hex format)
+    pub fn public_key(&self) -> Result<String> {
+        use ed25519_dalek::SigningKey;
+        
+        // Decode the hex secret key
+        let secret_bytes = hex::decode(&self.secret_key)
+            .map_err(|e| anyhow::anyhow!("Failed to decode secret key: {}", e))?;
+        
+        if secret_bytes.len() != 32 {
+            return Err(anyhow::anyhow!("Invalid secret key length: expected 32 bytes, got {}", secret_bytes.len()));
+        }
+        
+        // Create SigningKey from bytes
+        let signing_key = SigningKey::from_bytes(&secret_bytes.try_into().unwrap());
+        
+        // Get the public key (verifying key)
+        let verifying_key = signing_key.verifying_key();
+        
+        // Return hex-encoded public key
+        Ok(hex::encode(verifying_key.as_bytes()))
+    }
+    
+    /// Extract the public key from the account (removes "k:" prefix if present)
+    pub fn account_pubkey(&self) -> String {
+        if self.account.starts_with("k:") {
+            self.account[2..].to_string()
+        } else {
+            self.account.clone()
+        }
+    }
 }
 
 impl Config {
@@ -88,6 +131,30 @@ impl Config {
             None
         };
 
+        // Kadena Configuration (optional)
+        let kadena_config = if let Ok(account) = env::var("KADENA_ACCOUNT") {
+            let network_id =
+                env::var("KADENA_NETWORK").unwrap_or_else(|_| "mainnet01".to_string());
+            let chain_id = env::var("KADENA_CHAIN_ID").unwrap_or_else(|_| "1".to_string());
+            let api_host = env::var("KADENA_API_HOST").unwrap_or_else(|_| {
+                format!(
+                    "https://api.chainweb.com/chainweb/0.0/{}/chain/{}/pact",
+                    network_id, chain_id
+                )
+            });
+
+            Some(KadenaConfig {
+                account,
+                secret_key: env::var("KADENA_SECRET_KEY")
+                    .expect("KADENA_SECRET_KEY must be set when KADENA_ACCOUNT is provided"),
+                network_id,
+                chain_id,
+                api_host,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             api_host,
             api_port,
@@ -104,6 +171,7 @@ impl Config {
                 stun_port: relay_stun_port,
                 relay_url,
             },
+            kadena_config,
         })
     }
 }

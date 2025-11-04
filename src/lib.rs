@@ -9,6 +9,7 @@ pub mod graphql_indexing;
 pub mod indexing;
 pub mod ipfs;
 pub mod iroh_network;
+pub mod kadena;
 pub mod metrics;
 pub mod mqtt_bridge;
 pub mod resource_manager;

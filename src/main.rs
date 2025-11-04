@@ -6,6 +6,7 @@ mod filters;
 mod graphql;
 mod ipfs;
 mod iroh_network; // Iroh-based networking
+mod kadena; // Kadena blockchain integration
 mod metrics; // Performance metrics
 mod mqtt_bridge;
 mod retry; // Enhanced retry and circuit breaker mechanisms
@@ -96,7 +97,23 @@ async fn main() -> Result<()> {
     tokio::fs::create_dir_all(&data_dir).await?;
 
     // Load or generate secret key for persistent identity
-    let secret_key = {
+    // If Kadena config is available, derive from Kadena private key, otherwise use file-based key
+    let secret_key = if let Some(ref kadena_config) = config.kadena_config {
+        tracing::info!("Using Kadena private key to generate Iroh node identity");
+        // Decode the Kadena secret key (hex string)
+        let kadena_secret_bytes = hex::decode(&kadena_config.secret_key)
+            .map_err(|e| anyhow::anyhow!("Failed to decode Kadena secret key: {}", e))?;
+        
+        if kadena_secret_bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "Invalid Kadena secret key length: expected 32 bytes, got {}",
+                kadena_secret_bytes.len()
+            ));
+        }
+        
+        // Create Iroh SecretKey from the same 32 bytes
+        iroh::SecretKey::try_from(&kadena_secret_bytes[..])?
+    } else {
         let key_path = data_dir.join("secret_key");
         if key_path.exists() {
             let key_bytes = tokio::fs::read(&key_path).await?;
@@ -133,7 +150,10 @@ async fn main() -> Result<()> {
     }
 
     let node_id = endpoint.id();
-    tracing::info!("Iroh endpoint created with Node ID: {}", node_id);
+    tracing::info!("═══════════════════════════════════════════════════════");
+    tracing::info!("🆔 Iroh Node ID: {}", node_id);
+    tracing::info!("🆔 Iroh Public Key: {}", hex::encode(node_id.as_bytes()));
+    tracing::info!("═══════════════════════════════════════════════════════");
     tracing::info!("🔄 Relay mode enabled - this node can act as a relay for other peers");
     tracing::info!("🔍 Peer discovery: Use n0 DNS discovery or share node addresses manually");
 
@@ -283,6 +303,92 @@ async fn main() -> Result<()> {
     // Attach SyncManager to the network for inbound event handling
     network.attach_sync_manager(sync_manager.clone());
     tracing::info!("SyncManager attached to Iroh network for sync routing");
+
+    // Initialize Kadena node registry if configured
+    if let Some(kadena_config) = config.kadena_config.clone() {
+        tracing::info!("Initializing Kadena blockchain integration...");
+        let registry = kadena::NodeRegistry::new(kadena_config.clone());
+        
+        // Generate libp2p peer ID from Kadena private key for backward compatibility
+        let kadena_peer_id = match registry.generate_peer_id() {
+            Ok(pid) => {
+                tracing::info!("═══════════════════════════════════════════════════════");
+                tracing::info!("🔑 libp2p PeerId (from Kadena key): {}", pid);
+                tracing::info!("═══════════════════════════════════════════════════════");
+                pid
+            }
+            Err(e) => {
+                tracing::error!("Failed to generate peer ID from Kadena key: {}", e);
+                tracing::info!("Falling back to Iroh peer ID for Kadena registration");
+                peer_id.to_string()
+            }
+        };
+        
+        // Get public IP address
+        let public_ip = match kadena::get_public_ip().await {
+            Ok(ip) => {
+                tracing::info!("Public IP detected: {}", ip);
+                ip
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get public IP: {}, using 0.0.0.0", e);
+                "0.0.0.0".to_string()
+            }
+        };
+        
+        // Get QUIC port from bound socket
+        let local_endpoints = endpoint.bound_sockets();
+        let quic_port = local_endpoints
+            .first()
+            .map(|addr| addr.port())
+            .unwrap_or(0);
+        
+        // Derive public key from the private key
+        let public_key = kadena_config.public_key()
+            .map_err(|e| anyhow::anyhow!("Failed to derive public key: {}", e))?;
+        
+        // Format multiaddr as: publickey@ip:quicport
+        let node_multiaddr = format!("{}@{}:{}", public_key, public_ip, quic_port);
+        
+        tracing::info!("═══════════════════════════════════════════════════════");
+        tracing::info!("🔐 Kadena Public Key: {}", public_key);
+        tracing::info!("🌐 Kadena Multiaddr: {}", node_multiaddr);
+        tracing::info!("📍 Public IP: {} | Port: {}", public_ip, quic_port);
+        tracing::info!("═══════════════════════════════════════════════════════");
+        let registry = Arc::new(tokio::sync::Mutex::new(registry));
+
+        // Ensure node is registered and active
+        let multiaddr = node_multiaddr.clone();
+        let registry_clone = registry.clone();
+        let kadena_peer_id_clone = kadena_peer_id.clone();
+        
+        tokio::spawn(async move {
+            let registry = registry_clone.lock().await;
+            if let Err(e) = registry.ensure_registered(&kadena_peer_id_clone, &multiaddr).await {
+                tracing::error!("Failed to register node with Kadena: {}", e);
+            } else {
+                tracing::info!("Node successfully registered with Kadena blockchain (PeerId: {})", kadena_peer_id_clone);
+            }
+        });
+
+        // Spawn periodic status check and auto-claim task (every 10 minutes)
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // 10 minutes
+            interval.tick().await; // Skip first immediate tick
+            
+            loop {
+                interval.tick().await;
+                let registry = registry.lock().await;
+                if let Err(e) = registry.check_and_claim_rewards(&kadena_peer_id).await {
+                    tracing::warn!("Kadena status check/claim failed: {}", e);
+                } else {
+                    tracing::debug!("Kadena status check completed");
+                }
+            }
+        });
+    } else {
+        tracing::info!("Kadena blockchain integration disabled (no KADENA_ACCOUNT configured)");
+    }
 
     // Initialize MQTT bridge if enabled
     // Create broadcast channel for real-time message subscriptions first
