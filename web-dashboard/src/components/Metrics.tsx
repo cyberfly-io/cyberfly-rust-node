@@ -11,6 +11,7 @@ import {
   Cpu,
   BarChart3
 } from 'lucide-react';
+import { getApiBaseUrl } from '../api/client';
 
 interface MetricData {
   storageReads: number;
@@ -45,7 +46,8 @@ export default function Metrics() {
   const { data: metrics } = useQuery<MetricData>({
     queryKey: ['metrics'],
     queryFn: async () => {
-      const response = await fetch('http://localhost:8080/graphql', {
+      const apiUrl = getApiBaseUrl();
+      const response = await fetch(`${apiUrl}/graphql`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

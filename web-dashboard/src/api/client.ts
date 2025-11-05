@@ -16,7 +16,7 @@ function getHost(): string {
 }
 
 // Get API URL from localStorage or construct from host
-function getApiBaseUrl(): string {
+export function getApiBaseUrl(): string {
   const stored = localStorage.getItem('cyberfly_api_url');
   if (stored) {
     return stored;
