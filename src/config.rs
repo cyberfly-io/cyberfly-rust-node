@@ -80,9 +80,9 @@ impl Config {
         let api_host = env::var("API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
 
         let api_port = env::var("API_PORT")
-            .unwrap_or_else(|_| "8080".to_string())
+            .unwrap_or_else(|_| "31003".to_string())
             .parse()
-            .unwrap_or(8080);
+            .unwrap_or(31003);
 
         // Iroh bootstrap peers (NodeId@ip:port format)
         let bootstrap_peers = env::var("BOOTSTRAP_PEERS")
@@ -98,8 +98,12 @@ impl Config {
             .parse()
             .unwrap_or(true);
 
-        let mqtt_broker_host =
-            env::var("MQTT_BROKER_HOST").unwrap_or_else(|_| "localhost".to_string());
+        let mqtt_broker_host = env::var("MQTT_HOST")
+            .unwrap_or_else(|_| "localhost".to_string())
+            // Strip mqtt:// or mqtts:// prefix if present
+            .trim_start_matches("mqtt://")
+            .trim_start_matches("mqtts://")
+            .to_string();
 
         let mqtt_broker_port = env::var("MQTT_BROKER_PORT")
             .unwrap_or_else(|_| "1883".to_string())
@@ -116,12 +120,12 @@ impl Config {
             .unwrap_or(true);
 
         let relay_http_bind =
-            env::var("RELAY_HTTP_BIND").unwrap_or_else(|_| "0.0.0.0:3340".to_string());
+            env::var("RELAY_HTTP_BIND").unwrap_or_else(|_| "0.0.0.0:31002".to_string());
 
         let relay_stun_port = env::var("RELAY_STUN_PORT")
-            .unwrap_or_else(|_| "3478".to_string())
+            .unwrap_or_else(|_| "31006".to_string())
             .parse()
-            .unwrap_or(3478);
+            .unwrap_or(31006);
 
         // Build relay URL if relay is enabled
         let relay_url = if relay_enabled {
@@ -145,8 +149,8 @@ impl Config {
 
             Some(KadenaConfig {
                 account,
-                secret_key: env::var("KADENA_SECRET_KEY")
-                    .expect("KADENA_SECRET_KEY must be set when KADENA_ACCOUNT is provided"),
+                secret_key: env::var("NODE_PRIV_KEY")
+                    .expect("NODE_PRIV_KEY must be set when KADENA_ACCOUNT is provided"),
                 network_id,
                 chain_id,
                 api_host,

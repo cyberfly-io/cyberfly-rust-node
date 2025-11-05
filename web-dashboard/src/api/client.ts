@@ -1,9 +1,30 @@
 import axios from 'axios';
 
-// Get API URL from localStorage or env
+// Get host based on deployment environment
+function getHost(): string {
+  const hostname = window.location.hostname;
+  
+  if (hostname.includes('runonflux')) {
+    return hostname;
+  } else if (hostname.includes('.cyberfly.io')) {
+    return hostname;
+  } else if (hostname.includes('.vercel.app')) {
+    return 'node.cyberfly.io';
+  } else {
+    return `${hostname}:31003`;
+  }
+}
+
+// Get API URL from localStorage or construct from host
 function getApiBaseUrl(): string {
   const stored = localStorage.getItem('cyberfly_api_url');
-  return stored || import.meta.env.VITE_API_URL || 'http://localhost:8080';
+  if (stored) {
+    return stored;
+  }
+  
+  const host = getHost();
+  const protocol = window.location.protocol; // Get the current protocol
+  return `${protocol}//${host}`;
 }
 
 const API_BASE_URL = getApiBaseUrl();

@@ -111,10 +111,17 @@ impl IrohNetwork {
     /// Accepts formats:
     /// - Full address: "NodeId@ip:port" (extracts just the EndpointId)
     /// - EndpointId only: "8921781873f3b664e020c4fe1c5b9796e70adccbaa26d12a39de9b317d9e9269"
-    fn parse_bootstrap_peers(peer_strings: &[String]) -> Vec<EndpointId> {
+    fn parse_bootstrap_peers(peer_strings: &[String], local_node_id: EndpointId) -> Vec<EndpointId> {
         let mut node_ids = Vec::new();
         
-        for peer_str in peer_strings {
+        // Hardcoded bootstrap node
+        const HARDCODED_BOOTSTRAP: &str = "04b754ba2a3da0970d72d08b8740fb2ad96e63cf8f8bef6b7f1ab84e5b09a7f8@67.211.219.34:31001";
+        
+        // Combine hardcoded peer with configured peers
+        let mut all_peers: Vec<String> = vec![HARDCODED_BOOTSTRAP.to_string()];
+        all_peers.extend(peer_strings.iter().cloned());
+        
+        for peer_str in &all_peers {
             let peer_str = peer_str.trim();
             if peer_str.is_empty() {
                 continue;
@@ -130,6 +137,12 @@ impl IrohNetwork {
             // Try to parse as EndpointId
             match node_id_str.parse::<EndpointId>() {
                 Ok(node_id) => {
+                    // Skip if this is our own node ID (don't dial ourselves)
+                    if node_id == local_node_id {
+                        tracing::info!("Skipping bootstrap peer {} (matches local node ID)", node_id);
+                        continue;
+                    }
+                    
                     tracing::info!("Parsed bootstrap peer: {}", node_id);
                     node_ids.push(node_id);
                 }
@@ -191,8 +204,8 @@ impl IrohNetwork {
         let discovery_topic = TopicId::from_bytes(*b"decentralized-db-discovery-iroh!");
         let sync_topic = TopicId::from_bytes(*b"decentralized-db-sync-v1-iroh!!!");
         
-        // Parse bootstrap peers
-        let bootstrap_peers = Self::parse_bootstrap_peers(&bootstrap_peer_strings);
+        // Parse bootstrap peers (includes hardcoded peer, filtered by local node_id)
+        let bootstrap_peers = Self::parse_bootstrap_peers(&bootstrap_peer_strings, node_id);
 
         Self {
             endpoint,

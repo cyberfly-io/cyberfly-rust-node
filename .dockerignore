@@ -1,6 +1,9 @@
 # Rust build artifacts
 target/
 Cargo.lock
+**/*.rs.bk
+**/debug/
+**/release/
 
 # IDE and editor files
 .vscode/
@@ -8,6 +11,7 @@ Cargo.lock
 *.swp
 *.swo
 *~
+flycheck*/
 
 # OS generated files
 .DS_Store
@@ -43,6 +47,13 @@ nohup.out
 
 # Client SDK
 client-sdk/
+
+# Web dashboard
+web-dashboard/
+
+# Examples and tests
+examples/
+tests/
 
 # Scripts
 *.sh
