@@ -2,7 +2,7 @@
 // Replaces libp2p with Iroh's Endpoint + Router + Gossip + Blobs
 
 use anyhow::Result;
-use iroh::{Endpoint, EndpointId, SecretKey, protocol::Router};
+use iroh::{Endpoint, EndpointId, EndpointAddr, TransportAddr, SecretKey, protocol::Router};
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_gossip::{
     net::Gossip, 
@@ -103,6 +103,8 @@ pub struct IrohNetwork {
     discovered_peers: Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
     // Bootstrap peers for initial gossip network join
     bootstrap_peers: Vec<EndpointId>,
+    // Original bootstrap peer strings (with addresses)
+    bootstrap_peer_strings: Vec<String>,
 }
 
 impl IrohNetwork {
@@ -143,7 +145,7 @@ impl IrohNetwork {
                         continue;
                     }
                     
-                    tracing::info!("Parsed bootstrap peer: {}", node_id);
+                    tracing::info!("Parsed bootstrap peer: {} from '{}'", node_id, peer_str);
                     node_ids.push(node_id);
                 }
                 Err(e) => {
@@ -228,6 +230,7 @@ impl IrohNetwork {
             sync_sender: None,
             discovered_peers: Arc::new(dashmap::DashMap::new()),
             bootstrap_peers,
+            bootstrap_peer_strings,
         }
     }
 
@@ -291,6 +294,69 @@ impl IrohNetwork {
         tracing::info!("MQTT bridge connected to Iroh network");
     }
 
+    /// Add bootstrap peer addresses to endpoint's address book
+    async fn add_bootstrap_addresses(&self, peer_strings: &[String]) -> Result<()> {
+        use std::net::SocketAddr;
+        
+        // Hardcoded bootstrap node
+        const HARDCODED_BOOTSTRAP: &str = "04b754ba2a3da0970d72d08b8740fb2ad96e63cf8f8bef6b7f1ab84e5b09a7f8@67.211.219.34:31001";
+        
+        // Combine hardcoded peer with configured peers
+        let mut all_peers: Vec<String> = vec![HARDCODED_BOOTSTRAP.to_string()];
+        all_peers.extend(peer_strings.iter().cloned());
+        
+        for peer_str in &all_peers {
+            let peer_str = peer_str.trim();
+            if peer_str.is_empty() {
+                continue;
+            }
+            
+            // Parse "EndpointId@ip:port" format
+            if let Some(at_idx) = peer_str.find('@') {
+                let node_id_str = &peer_str[..at_idx];
+                let socket_addr_str = &peer_str[at_idx + 1..];
+                
+                match node_id_str.parse::<EndpointId>() {
+                    Ok(node_id) => {
+                        // Skip our own node ID
+                        if node_id == self.node_id {
+                            continue;
+                        }
+                        
+                        match socket_addr_str.parse::<SocketAddr>() {
+                            Ok(socket_addr) => {
+                                // Create EndpointAddr with node ID and socket address
+                                let endpoint_addr = EndpointAddr::from_parts(
+                                    node_id,
+                                    [TransportAddr::Ip(socket_addr)],
+                                );
+                                
+                                // Try to connect using gossip ALPN
+                                tracing::info!("Attempting to connect to bootstrap peer {} at {}", node_id, socket_addr);
+                                match self.endpoint.connect(endpoint_addr, iroh_gossip::ALPN).await {
+                                    Ok(_conn) => {
+                                        tracing::info!("✓ Successfully connected to bootstrap peer {} at {}", node_id, socket_addr);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to connect to bootstrap peer {} at {}: {}", node_id, socket_addr, e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to parse socket address '{}': {}", socket_addr_str, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse node ID '{}': {}", node_id_str, e);
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
     /// Main event loop
     pub async fn run(&mut self) -> Result<()> {
         // Initialize gossip discovery for automatic peer discovery
@@ -304,6 +370,11 @@ impl IrohNetwork {
             tracing::warn!("   Set BOOTSTRAP_PEERS env var to enable peer discovery");
         } else {
             tracing::info!("✓ Using {} bootstrap peer(s) for gossip network join", bootstrap_peers.len());
+            
+            // Add bootstrap addresses to endpoint before subscribing
+            if let Err(e) = self.add_bootstrap_addresses(&self.bootstrap_peer_strings.clone()).await {
+                tracing::warn!("Failed to add bootstrap addresses: {}", e);
+            }
         }
         
         // Subscribe to data topic with bootstrap peers
