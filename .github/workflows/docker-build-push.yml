@@ -22,9 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
     
     steps:
       - name: Checkout repository
@@ -33,26 +35,32 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Install cargo-zigbuild
+        run: pip install cargo-zigbuild
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.11.0
 
       - name: Build for ${{ matrix.target }}
-        run: cross build --release --target ${{ matrix.target }}
+        env:
+          OPENSSL_STATIC: 1
+          OPENSSL_VENDORED: 1
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: "zig cc -target aarch64-linux-musl"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: "zig cc -target x86_64-linux-musl"
+        run: cargo zigbuild --release --target ${{ matrix.target }}
 
       - name: Strip binary
         run: |
-          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
             strip target/${{ matrix.target }}/release/cyberfly-rust-node
-          else
-            docker run --rm -v $PWD:/workspace -w /workspace \
-              ghcr.io/cross-rs/aarch64-unknown-linux-musl:latest \
-              aarch64-linux-musl-strip target/${{ matrix.target }}/release/cyberfly-rust-node
           fi
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cyberfly-rust-node-${{ matrix.target }}
+          name: cyberfly-rust-node-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/cyberfly-rust-node
           retention-days: 1
 
@@ -70,13 +78,13 @@ jobs:
       - name: Download x86_64 binary
         uses: actions/download-artifact@v4
         with:
-          name: cyberfly-rust-node-x86_64-unknown-linux-musl
+          name: cyberfly-rust-node-amd64
           path: ./bin-amd64
 
       - name: Download arm64 binary
         uses: actions/download-artifact@v4
         with:
-          name: cyberfly-rust-node-aarch64-unknown-linux-musl
+          name: cyberfly-rust-node-arm64
           path: ./bin-arm64
 
       - name: Rename binaries for Docker
