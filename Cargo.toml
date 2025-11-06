@@ -23,6 +23,9 @@ ed25519-dalek = { version = "3.0.0-pre.1", features = ["rand_core"] }
 signature = "2.2"
 libp2p-identity = { version = "0.2", features = ["ed25519", "peerid"] }
 
+# OpenSSL with vendored feature for cross-compilation
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
 # CRDT
 automerge = "0.6"
 
@@ -101,7 +104,3 @@ opt-level = 3          # Maximum optimization
 lto = "thin"           # Thin LTO for faster linking with good optimization
 codegen-units = 1      # Better optimization, slower compile (only for release)
 strip = true           # Strip symbols to reduce binary size
-
-# Force vendored OpenSSL for cross-compilation
-[patch.crates-io]
-openssl-sys = { version = "0.9", features = ["vendored"] }
