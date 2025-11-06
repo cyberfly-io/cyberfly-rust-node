@@ -243,7 +243,7 @@ export const claimReward = async (account: string, peerId: string): Promise<any>
     .execution(`(free.cyberfly_node.claim-reward "${account}" "${peerId}")`)
     .addSigner(getPubkey(account), (withCapability) => [
       withCapability('free.cyberfly-account-gas-station.GAS_PAYER', 'cyberfly-account-gas', { int: 1 }, 1.0),
-      withCapability('free.cyberfly_node.ACCOUNT_AUTH', account),
+      withCapability('free.cyberfly_node.NODE_GUARD', peerId),
     ])
     .setMeta({
       chainId,
