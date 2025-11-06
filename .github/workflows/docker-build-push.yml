@@ -32,6 +32,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y perl make
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
@@ -48,11 +53,15 @@ jobs:
 
       - name: Build for ${{ matrix.target }}
         env:
-          OPENSSL_STATIC: 1
-          OPENSSL_VENDORED: 1
+          OPENSSL_STATIC: "1"
+          OPENSSL_VENDORED: "1"
+          OPENSSL_NO_VENDOR: "0"
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: "zig cc -target aarch64-linux-musl"
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: "zig cc -target x86_64-linux-musl"
-        run: cargo zigbuild --release --target ${{ matrix.target }}
+        run: |
+          export OPENSSL_STATIC=1
+          export OPENSSL_VENDORED=1
+          cargo zigbuild --release --target ${{ matrix.target }}
 
       - name: Strip binary
         run: |

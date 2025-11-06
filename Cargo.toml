@@ -101,3 +101,7 @@ opt-level = 3          # Maximum optimization
 lto = "thin"           # Thin LTO for faster linking with good optimization
 codegen-units = 1      # Better optimization, slower compile (only for release)
 strip = true           # Strip symbols to reduce binary size
+
+# Force vendored OpenSSL for cross-compilation
+[patch.crates-io]
+openssl-sys = { version = "0.9", features = ["vendored"] }
