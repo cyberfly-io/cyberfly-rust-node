@@ -35,6 +35,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Install cargo-zigbuild
         run: pip install cargo-zigbuild
 
