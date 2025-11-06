@@ -1,66 +1,57 @@
 # syntax=docker/dockerfile:1.3
-# Build stage - Use Rust Alpine with musl
-FROM rustlang/rust:nightly-alpine AS builder
 
+# Stage 1: Install cargo-chef and build dependencies
+FROM --platform=$BUILDPLATFORM rust:alpine AS chef
 WORKDIR /app
+ENV PKG_CONFIG_SYSROOT_DIR=/
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static zig
+RUN cargo install --locked cargo-zigbuild cargo-chef
+RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 
-# Install build dependencies including OpenSSL for musl
-RUN apk add --no-cache \
-    musl-dev \
-    pkgconfig \
-    openssl-dev \
-    openssl-libs-static
-
-# Set up Rust compilation cache (speeds up incremental builds)
-ENV CARGO_INCREMENTAL=1
-ENV CARGO_HOME=/usr/local/cargo
-
-# Copy dependency files first for better caching
+# Stage 2: Prepare recipe.json
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock* ./
+COPY src src
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Create a dummy main.rs to build dependencies
-RUN mkdir -p src && echo "fn main() {}" > src/main.rs
+# Stage 3: Build dependencies (cached layer)
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --recipe-path recipe.json --release --zigbuild \
+    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
 
-# Build dependencies with cache mount
-# When Cargo.toml changes, this layer rebuilds but uses cached registry downloads
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
-    cargo build --release
+# Stage 4: Build the application for both architectures
+COPY . .
+RUN cargo zigbuild --release \
+    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl && \
+    mkdir -p /app/linux/amd64 /app/linux/arm64 && \
+    cp target/x86_64-unknown-linux-musl/release/cyberfly-rust-node /app/linux/amd64/cyberfly-rust-node && \
+    cp target/aarch64-unknown-linux-musl/release/cyberfly-rust-node /app/linux/arm64/cyberfly-rust-node && \
+    strip /app/linux/amd64/cyberfly-rust-node && \
+    strip /app/linux/arm64/cyberfly-rust-node
 
-# Copy source code
-COPY src ./src
-COPY schema.graphql ./
+# Stage 5: Runtime image
+FROM alpine:latest AS runtime
 
-# Build the actual application with cache mounts
-# Touch source files to force rebuild of app code only, not dependencies
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
-    find src -type f -name "*.rs" -exec touch {} + && \
-    cargo build --release && \
-    cp /app/target/release/cyberfly-rust-node /app/cyberfly-rust-node-final && \
-    strip /app/cyberfly-rust-node-final
-
-# Runtime stage - Minimal Alpine
-FROM alpine:latest
-
-# Install only essential runtime dependencies
+# Install runtime dependencies
 RUN apk add --no-cache ca-certificates && \
     adduser -D -s /bin/sh cyberfly
 
 WORKDIR /app
 
-# Create data directory and set ownership before copying files
+# Create data directory and set ownership
 RUN mkdir -p /app/data/iroh && \
     chown -R cyberfly:cyberfly /app
 
-# Copy the statically linked binary and schema
-COPY --from=builder --chown=cyberfly:cyberfly /app/cyberfly-rust-node-final /app/cyberfly-rust-node
-COPY --from=builder --chown=cyberfly:cyberfly /app/schema.graphql /app/schema.graphql
+# Copy the correct binary based on target platform
+ARG TARGETPLATFORM
+COPY --from=builder --chown=cyberfly:cyberfly /app/${TARGETPLATFORM}/cyberfly-rust-node /app/cyberfly-rust-node
+COPY --chown=cyberfly:cyberfly schema.graphql /app/schema.graphql
 
 # Switch to non-root user
 USER cyberfly
 
-# Expose port
+# Expose ports
 EXPOSE 31001 31002 31003 31006
 
 # Run the application
