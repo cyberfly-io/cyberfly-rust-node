@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
         // TODO: Migrate to new discovery API in iroh 0.94 (unified discovery())
         .secret_key(secret_key)
         .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::empty())) // Enable relay mode
-        .bind_addr_v4(bind_addr) // Bind to fixed port 11204 (fallback to random if unavailable)
+        .bind_addr_v4(bind_addr) // Bind to fixed port 31001 for bootstrap peer connectivity
         .bind()
         .await?;
 

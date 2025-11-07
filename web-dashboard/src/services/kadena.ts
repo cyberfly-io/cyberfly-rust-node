@@ -41,7 +41,7 @@ export async function getAPY(): Promise<number | null> {
 /**
  * Get stake statistics from Kadena smart contract
  */
-export async function getStakeStats(): Promise<{ totalStakes: number; activeStakes: number } | null> {
+export async function getStakeStats(): Promise<{ totalStakes: number; activeStakes: number; totalStakedAmount: number } | null> {
   try {
     const unsignedTransaction = Pact.builder
       .execution(`(free.cyberfly_node.get-stakes-stats)`)
@@ -72,9 +72,12 @@ export async function getStakeStats(): Promise<{ totalStakes: number; activeStak
         return 0;
       };
       
+      const totalStakes = parseKadenaNumber(data['total-stakes']);
+      
       return {
-        totalStakes: parseKadenaNumber(data['total-stakes'] || data.totalStakes),
-        activeStakes: parseKadenaNumber(data['active-stakes'] || data.activeStakes),
+        totalStakes: totalStakes,
+        activeStakes: totalStakes, // Use total-stakes as active-stakes since it's not provided
+        totalStakedAmount: parseKadenaNumber(data['total-staked-amount']),
       };
     }
     

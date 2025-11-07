@@ -148,8 +148,9 @@ export default function Dashboard() {
           </div>
         </div>
         
+                
         <div className="p-6 space-y-6 backdrop-blur-xl">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <StatBox
               icon={<TrendingUp className="w-5 h-5 text-green-600" />}
               label="Current APY"
@@ -160,16 +161,23 @@ export default function Dashboard() {
             <StatBox
               icon={<Coins className="w-5 h-5 text-emerald-600" />}
               label="Active Stakes"
-              value={stakeStats?.activeStakes !== undefined ? stakeStats.activeStakes.toString() : 'Loading...'}
-              subtitle={stakeStats?.totalStakes !== undefined ? `Total: ${stakeStats.totalStakes} nodes` : 'Loading...'}
+              value={stakeStats?.totalStakes !== undefined ? stakeStats.totalStakes.toString() : 'Loading...'}
+              subtitle={stakeStats?.activeStakes !== undefined ? `Active: ${stakeStats.activeStakes} nodes` : 'Loading...'}
               color="green"
+            />
+            <StatBox
+              icon={<Coins className="w-5 h-5 text-blue-600" />}
+              label="Total Staked"
+              value={stakeStats?.totalStakedAmount !== undefined ? `${stakeStats.totalStakedAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} CFLY` : 'Loading...'}
+              subtitle="Total amount staked"
+              color="blue"
             />
           </div>
           
           <div className="glass dark:glass-dark rounded-lg p-4 backdrop-blur-md border border-white/10 dark:border-gray-600/30">
             <p className="text-sm text-gray-600 dark:text-gray-400 text-center">
               {apy !== null ? (
-                `� Real-time data from Kadena blockchain`
+                `📊 Real-time data from Kadena blockchain`
               ) : (
                 `💡 Connecting to Kadena network...`
               )}

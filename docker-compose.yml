@@ -32,7 +32,8 @@ services:
     ports:
       - "8080:8080"      # GraphQL API port
       - "8081:8081"      # Additional service port
-      - "11204:11204"    # Iroh QUIC P2P port
+      - "31001:31001/udp"    # Iroh QUIC P2P port (UDP for QUIC)
+      - "31001:31001/tcp"    # Iroh QUIC P2P port (TCP fallback)
       - "3478:3478"      # Iroh STUN relay port
     environment:
       - RUST_LOG=info
