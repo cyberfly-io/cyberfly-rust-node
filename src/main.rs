@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
     tracing::info!("🔍 Peer discovery: Use n0 DNS discovery or share node addresses manually");
 
     // Start Iroh relay server if enabled
-    if config.relay_config.enabled {
+    let relay_url_with_public_ip = if config.relay_config.enabled {
         tracing::info!("🚀 Starting Iroh Relay Server...");
         tracing::info!(
             "   HTTP Bind Address: {}",
@@ -180,15 +180,25 @@ async fn main() -> Result<()> {
             }
         });
 
+        // Get public IP for relay URL
+        let relay_public_ip = match kadena::get_public_ip().await {
+            Ok(ip) => ip,
+            Err(e) => {
+                tracing::warn!("Failed to get public IP for relay: {}, using config.api_host", e);
+                config.api_host.clone()
+            }
+        };
+
+        let relay_url = format!("iroh-relay://{}:{}", relay_public_ip, config.relay_config.stun_port);
+
         tracing::info!("✅ Relay server started successfully");
-        tracing::info!(
-            "📡 Other nodes can connect to this relay at: iroh-relay://{}:{}",
-            config.api_host,
-            config.relay_config.stun_port
-        );
+        tracing::info!("📡 Other nodes can connect to this relay at: {}", relay_url);
+        
+        Some(relay_url)
     } else {
         tracing::info!("⚠️  Relay server disabled");
-    }
+        None
+    };
 
     // Create blob storage
     let store = iroh_blobs::store::fs::FsStore::load(&data_dir).await?;
@@ -518,7 +528,7 @@ async fn main() -> Result<()> {
         Some(endpoint_for_graphql), // Pass endpoint instead of wrapped network
         Some(discovered_peers_map), // Pass discovered peers map
         Some(network_for_graphql),   // Pass Arc<Mutex<IrohNetwork>> for dial_peer
-        config.relay_config.relay_url.clone(), // Pass relay URL
+        relay_url_with_public_ip, // Pass relay URL with public IP
         mqtt_tx,
         mqtt_to_gossip_tx,
         mqtt_store,
@@ -546,13 +556,24 @@ async fn main() -> Result<()> {
     });
 
     // Start GraphQL API server
+    let listener =
+        tokio::net::TcpListener::bind(format!("{}:{}", config.api_host, config.api_port)).await?;
+    
+    // Get public IP for informational logging
+    let api_public_ip = match kadena::get_public_ip().await {
+        Ok(ip) => ip,
+        Err(_) => config.api_host.clone(),
+    };
+    
     tracing::info!(
-        "GraphQL API listening on http://{}:{}",
+        "🚀 GraphQL API listening on {}:{} (bind: {}:{})",
+        api_public_ip,
+        config.api_port,
         config.api_host,
         config.api_port
     );
-    let listener =
-        tokio::net::TcpListener::bind(format!("{}:{}", config.api_host, config.api_port)).await?;
+    tracing::info!("📊 GraphQL Playground: http://{}:{}/", api_public_ip, config.api_port);
+    
     axum::serve(listener, graphql_server.into_make_service()).await?;
 
     Ok(())
