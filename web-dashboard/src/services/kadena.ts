@@ -60,9 +60,21 @@ export async function getStakeStats(): Promise<{ totalStakes: number; activeStak
 
     if (res.result.status === 'success') {
       const data = res.result.data as any;
+      
+      // Helper to parse Kadena numbers (which might be objects with 'int' or 'decimal' fields)
+      const parseKadenaNumber = (value: unknown): number => {
+        if (typeof value === 'number') return value;
+        if (typeof value === 'object' && value !== null) {
+          const obj = value as Record<string, unknown>;
+          if (obj.int !== undefined) return Number(obj.int);
+          if (obj.decimal !== undefined) return parseFloat(String(obj.decimal));
+        }
+        return 0;
+      };
+      
       return {
-        totalStakes: data['total-stakes'] || data.totalStakes || 0,
-        activeStakes: data['active-stakes'] || data.activeStakes || 0,
+        totalStakes: parseKadenaNumber(data['total-stakes'] || data.totalStakes),
+        activeStakes: parseKadenaNumber(data['active-stakes'] || data.activeStakes),
       };
     }
     
