@@ -20,6 +20,8 @@ env:
 jobs:
   build-rust-binaries:
     runs-on: ubuntu-latest
+    container:
+      image: debian:bookworm
     strategy:
       matrix:
         include:
@@ -34,8 +36,8 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y perl make gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          apt-get update
+          apt-get install -y curl build-essential perl make gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config libssl-dev git
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

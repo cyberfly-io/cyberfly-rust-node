@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
-import { Activity, Database, Network, HardDrive, Copy, Check, Server, Clock } from 'lucide-react';
+import { Activity, Database, Network, HardDrive, Copy, Check, Server, Clock, TrendingUp, Coins } from 'lucide-react';
 import { getNodeInfo, getDiscoveredPeers } from '../api/client';
+import { getAPY, getStakeStats } from '../services/kadena';
 import { useState } from 'react';
 
 export default function Dashboard() {
@@ -14,6 +15,18 @@ export default function Dashboard() {
     queryKey: ['peers'],
     queryFn: getDiscoveredPeers,
     refetchInterval: 5000,
+  });
+
+  const { data: apy } = useQuery({
+    queryKey: ['apy'],
+    queryFn: getAPY,
+    refetchInterval: 60000, // Refetch every minute
+  });
+
+  const { data: stakeStats } = useQuery({
+    queryKey: ['stakeStats'],
+    queryFn: getStakeStats,
+    refetchInterval: 30000, // Refetch every 30 seconds
   });
 
   return (
@@ -117,6 +130,50 @@ export default function Dashboard() {
                 value="Iroh v0.94.0" 
               />
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Staking Statistics */}
+      <div className="glass dark:glass-dark rounded-2xl shadow-2xl overflow-hidden card-hover backdrop-blur-xl border border-white/20 dark:border-gray-700/50">
+        <div className="bg-gradient-to-r from-green-500 via-emerald-600 to-teal-600 px-8 py-6 animate-gradient">
+          <div className="flex items-center gap-4">
+            <div className="bg-white/20 p-3 rounded-xl shadow-lg backdrop-blur-sm">
+              <Coins className="w-8 h-8 text-white" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-white">Staking & Rewards</h2>
+              <p className="text-green-100 text-base">Node rewards and staking information</p>
+            </div>
+          </div>
+        </div>
+        
+        <div className="p-6 space-y-6 backdrop-blur-xl">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <StatBox
+              icon={<TrendingUp className="w-5 h-5 text-green-600" />}
+              label="Current APY"
+              value={apy !== null && apy !== undefined ? `${apy.toFixed(2)}%` : 'Loading...'}
+              subtitle="Annual percentage yield"
+              color="green"
+            />
+            <StatBox
+              icon={<Coins className="w-5 h-5 text-emerald-600" />}
+              label="Active Stakes"
+              value={stakeStats?.activeStakes !== undefined ? stakeStats.activeStakes.toString() : 'Loading...'}
+              subtitle={stakeStats?.totalStakes !== undefined ? `Total: ${stakeStats.totalStakes} nodes` : 'Loading...'}
+              color="green"
+            />
+          </div>
+          
+          <div className="glass dark:glass-dark rounded-lg p-4 backdrop-blur-md border border-white/10 dark:border-gray-600/30">
+            <p className="text-sm text-gray-600 dark:text-gray-400 text-center">
+              {apy !== null ? (
+                `� Real-time data from Kadena blockchain`
+              ) : (
+                `💡 Connecting to Kadena network...`
+              )}
+            </p>
           </div>
         </div>
       </div>
