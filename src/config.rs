@@ -142,7 +142,7 @@ impl Config {
             let chain_id = env::var("KADENA_CHAIN_ID").unwrap_or_else(|_| "1".to_string());
             let api_host = env::var("KADENA_API_HOST").unwrap_or_else(|_| {
                 format!(
-                    "https://api.chainweb.com/chainweb/0.0/{}/chain/{}/pact",
+                    "https://chainweb.ecko.finance/chainweb/0.0/{}/chain/{}/pact",
                     network_id, chain_id
                 )
             });
