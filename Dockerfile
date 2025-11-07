@@ -1,10 +1,14 @@
 # Dockerfile for pre-built binaries
-# Build binaries with: cross build --release --target <target>
-FROM alpine:latest
+# Build binaries with: cargo build --release --target <target>
+FROM debian:bookworm-slim
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates libgcc && \
-    adduser -D -s /bin/sh cyberfly
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/* && \
+    useradd -m -s /bin/bash cyberfly
 
 WORKDIR /app
 
@@ -25,6 +29,10 @@ USER cyberfly
 
 # Expose ports
 EXPOSE 31001 31002 31003 31006
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD ["/app/cyberfly-rust-node", "--version"] || exit 1
 
 # Run the application
 CMD ["/app/cyberfly-rust-node"]
