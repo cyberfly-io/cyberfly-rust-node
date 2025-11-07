@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
         
         Some(relay_url)
     } else {
-        tracing::info!("⚠️  Relay server disabled");
+        tracing::info!("⚠️ Relay server disabled");
         None
     };
 
