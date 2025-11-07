@@ -34,10 +34,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Cache apt packages
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/docker-build-push.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
+
       - name: Install build dependencies
         run: |
           apt-get update
           apt-get install -y curl build-essential perl make gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config libssl-dev git
+
+      # Cache Rust toolchain
+      - name: Cache Rust toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.rustup/settings.toml
+          key: ${{ runner.os }}-rustup-${{ hashFiles('rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rustup-
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
