@@ -18,9 +18,6 @@ use rumqttc::QoS;
 
 use crate::mqtt_bridge::{GossipToMqttMessage, MqttToGossipMessage, MessageOrigin};
 
-/// ALPN protocol identifier for peer connections
-const ALPN: &[u8] = b"cyberfly/p2p/0";
-
 /// Network event types
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
