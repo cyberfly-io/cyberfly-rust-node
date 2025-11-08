@@ -2180,6 +2180,9 @@ pub async fn create_server(
     message_broadcast: Option<broadcast::Sender<MessageEvent>>,
     sync_outbound: Option<tokio::sync::mpsc::UnboundedSender<crate::sync::SyncMessage>>,
 ) -> Result<Router> {
+    // Initialize start time when server is created (not on first request)
+    let _ = get_start_time();
+    
     // Use provided broadcast channel or create a new one
     let broadcast_tx = message_broadcast.unwrap_or_else(|| {
         let (tx, _) = broadcast::channel::<MessageEvent>(1000);
