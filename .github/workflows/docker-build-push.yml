@@ -15,7 +15,6 @@ on:
 env:
   REGISTRY: docker.io
   BACKEND_IMAGE_NAME: cyberfly/cyberfly_node
-  FRONTEND_IMAGE_NAME: cyberfly/cyberfly_node_ui
 
 jobs:
   build-rust-binaries:
@@ -191,7 +190,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  build-frontend:
+
     runs-on: ubuntu-latest
     permissions:
       contents: read
