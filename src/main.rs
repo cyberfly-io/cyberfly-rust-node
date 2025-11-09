@@ -385,9 +385,9 @@ async fn main() -> Result<()> {
             }
         });
 
-        // Spawn periodic status check and auto-claim task (every 10 minutes)
+        // Spawn periodic status check and auto-claim task (every 1 minute)
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // 10 minutes
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // 1 minute
             interval.tick().await; // Skip first immediate tick
             
             loop {

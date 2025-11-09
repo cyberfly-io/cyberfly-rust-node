@@ -506,8 +506,8 @@ impl NodeRegistry {
 
         // Check if rewards are claimable
         if let Some(reward_info) = self.calculate_rewards(peer_id).await? {
-            if reward_info.days >= 1.0 && reward_info.reward > 0.0 {
-                info!("Rewards available: {} days, {} tokens", reward_info.days, reward_info.reward);
+            if reward_info.reward > 0.0 {
+                info!("Rewards available: {} days, {} tokens - claiming now", reward_info.days, reward_info.reward);
                 self.claim_reward(peer_id).await?;
             } else {
                 debug!("No claimable rewards yet (days: {}, reward: {})", reward_info.days, reward_info.reward);
