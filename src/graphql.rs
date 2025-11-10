@@ -2254,7 +2254,7 @@ pub async fn create_server(
 
     let app = Router::new()
         .route("/", get(graphiql_handler))
-        .route("/graphql", get(graphql_handler).post(graphql_handler))
+        .route("/graphql", get(graphiql_handler).post(graphql_handler))
         .route("/ws", get(graphql_subscription_handler))
         .route("/playground", get(graphql_playground))
         .route("/schema.graphql", get(graphql_schema_handler))
