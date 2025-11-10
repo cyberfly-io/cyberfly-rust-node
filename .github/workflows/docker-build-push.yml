@@ -42,10 +42,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-apt-
 
-      - name: Install build dependencies
+      - name: Install build dependencies (including mold linker for speed)
         run: |
           apt-get update
-          apt-get install -y curl build-essential perl make gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config libssl-dev git
+          apt-get install -y curl build-essential perl make gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config libssl-dev git mold clang lld
 
       # Cache Rust toolchain
       - name: Cache Rust toolchain
@@ -92,15 +92,39 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-git-
 
-      # Cache compiled dependencies (target directory)
+      # Cache compiled dependencies (target directory) - optimized for new build profile
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+          path: |
+            target
+            ~/.cargo/.package-cache
+          key: ${{ runner.os }}-cargo-build-v2-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-
-            ${{ runner.os }}-cargo-build-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-build-v2-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-build-v2-${{ matrix.target }}-
+
+      # Install sccache for faster dependency compilation
+      - name: Install sccache
+        run: |
+          curl -L https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-x86_64-unknown-linux-musl.tar.gz | tar xz
+          mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/local/bin/
+          chmod +x /usr/local/bin/sccache
+          sccache --version
+
+      - name: Configure sccache
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$HOME/.cache/sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=2G" >> $GITHUB_ENV
+
+      - name: Cache sccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: ${{ runner.os }}-sccache-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sccache-${{ matrix.target }}-
 
       - name: Setup cross-compilation for ARM64
         if: matrix.arch == 'arm64'
@@ -109,8 +133,16 @@ jobs:
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
+      - name: Setup faster linker for x86_64
+        if: matrix.arch == 'amd64'
+        run: |
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
+
       - name: Build for ${{ matrix.target }}
-        run: cargo build --release --target ${{ matrix.target }} -j$(nproc)
+        run: |
+          echo "Building with optimized profile (Fat LTO, opt-level 3)"
+          cargo build --release --target ${{ matrix.target }} -j$(nproc)
+          sccache --show-stats
 
       - name: Strip binary
         run: |

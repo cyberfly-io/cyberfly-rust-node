@@ -91,16 +91,38 @@ serial_test = "3.0"
 opt-level = 0          # No optimization (fastest compile)
 debug = true           # Keep debug info
 incremental = true     # Enable incremental compilation (default)
-codegen-units = 256    # More parallelism for faster compilation (slight runtime cost)
+codegen-units = 256    # Maximum parallelism for fastest compilation
+split-debuginfo = "unpacked" # Faster debug builds on macOS/Linux
+
+# Optimize dependencies even in dev mode (huge compile time savings)
+[profile.dev.package."*"]
+opt-level = 2          # Optimize dependencies while keeping our code fast to compile
+debug = false          # Don't generate debug info for dependencies
 
 [profile.test]
 # Faster test compilation
 opt-level = 0          # No optimization for tests
 debug = true           # Keep debug info for better stack traces
+incremental = true     # Enable incremental compilation for tests
+
+# Optimize test dependencies
+[profile.test.package."*"]
+opt-level = 2
+debug = false
 
 [profile.release]
-# Full optimization for production
+# Full optimization for production - maximum performance
 opt-level = 3          # Maximum optimization
-lto = "thin"           # Thin LTO for faster linking with good optimization
-codegen-units = 1      # Better optimization, slower compile (only for release)
+lto = "fat"            # Full LTO for maximum performance
+codegen-units = 1      # Single codegen unit for best optimization
 strip = true           # Strip symbols to reduce binary size
+panic = "abort"        # Smaller binary, faster panic handling
+debug = false          # No debug info in release
+
+# Optional: Use faster linker (requires mold/lld installation)
+# Uncomment after installing: brew install mold (macOS) or cargo install mold (cross-platform)
+# [target.x86_64-apple-darwin]
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+# 
+# [target.aarch64-apple-darwin]
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
