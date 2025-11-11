@@ -1,11 +1,15 @@
-# Dockerfile for musl-based static binaries
-# Build binaries with: cargo build --release --target x86_64-unknown-linux-musl
-# Using Alpine for minimal image size with musl libc
-FROM alpine:3.19
+# Dockerfile for pre-built binaries
+# Build binaries with: cargo build --release --target <target>
+# Using Debian Bookworm to match build environment GLIBC
+FROM debian:bookworm-slim
 
-# Install only CA certificates (static binary needs nothing else)
-RUN apk add --no-cache ca-certificates && \
-    adduser -D -s /bin/sh cyberfly
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/* && \
+    useradd -m -s /bin/bash cyberfly
 
 WORKDIR /app
 
