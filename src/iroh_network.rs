@@ -756,17 +756,17 @@ impl IrohNetwork {
                             tracing::info!("📨 Received gossip message - origin: {}, topic: {:?}, from: {}", 
                                 gossip_msg.origin, gossip_msg.topic, from);
                             
-                            // Check if this is a process latency request
+                            // Check if this is a fetch latency request
                             if let Some(ref topic) = gossip_msg.topic {
-                                if topic == "process-latency-request" {
-                                    tracing::info!("⏱️  Received process-latency-request");
-                                    // Handle process latency request in a separate task
+                                if topic == "fetch-latency-request" {
+                                    tracing::info!("⏱️  Received fetch-latency-request");
+                                    // Handle fetch latency request in a separate task
                                     let data = gossip_msg.payload.clone();
                                     let sender = data_sender.clone();
                                     let node_id_str = node_id.to_string();
                                     tokio::spawn(async move {
-                                        if let Err(e) = Self::handle_process_latency_request(data, sender, node_id_str).await {
-                                            tracing::error!("Failed to handle process latency request: {}", e);
+                                        if let Err(e) = Self::handle_fetch_latency_request(data, sender, node_id_str).await {
+                                            tracing::error!("Failed to handle fetch latency request: {}", e);
                                         }
                                     });
                                     return Ok(());
@@ -983,17 +983,30 @@ impl IrohNetwork {
         self.sync_sender.clone()
     }
 
-    /// Handle process latency request
-    async fn handle_process_latency_request(
+    /// Handle fetch latency request with signature verification
+    async fn handle_fetch_latency_request(
         data: Vec<u8>,
         data_sender: Arc<Mutex<GossipSender>>,
         node_id: String,
     ) -> Result<()> {
         use std::time::Instant;
         
-        // Parse the request
+        // Whitelist of allowed public keys (same as TypeScript version)
+        const WHITELISTED_KEYS: &[&str] = &[
+            "efcfe1ac4de7bcb991d8b08a7d8ebed2377a6ed1070636dc66d9cdd225458aaa"
+        ];
+        
+        // Parse the outer request structure with signature
         #[derive(serde::Deserialize)]
-        struct LatencyRequest {
+        struct SignedRequest {
+            data: LatencyRequestData,
+            sig: String,
+            pubkey: String,
+        }
+        
+        // Parse the request
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct LatencyRequestData {
             request_id: String,
             url: String,
             method: Option<String>,
@@ -1016,7 +1029,7 @@ impl IrohNetwork {
             error: Option<String>,
         }
 
-        let request: LatencyRequest = match serde_json::from_slice(&data) {
+        let signed_request: SignedRequest = match serde_json::from_slice(&data) {
             Ok(req) => req,
             Err(e) => {
                 tracing::error!("Failed to parse latency request: {}", e);
@@ -1024,14 +1037,90 @@ impl IrohNetwork {
             }
         };
 
-        tracing::info!("⏱️  Processing latency request {} for URL: {}", request.request_id, request.url);
+        let request_id = signed_request.data.request_id.clone();
+
+        // Verify public key is whitelisted
+        if !WHITELISTED_KEYS.contains(&signed_request.pubkey.as_str()) {
+            tracing::warn!("⚠️  Public key not whitelisted: {}", signed_request.pubkey);
+            
+            let response = LatencyResponse {
+                request_id,
+                status: 403,
+                status_text: "Forbidden".to_string(),
+                latency: 0.0,
+                node_region: Some(super::node_region::get_node_region()),
+                node_id: node_id.clone(),
+                error: Some("Public key not whitelisted".to_string()),
+            };
+            
+            Self::publish_latency_response(response, data_sender, node_id).await?;
+            return Ok(());
+        }
+
+        // Verify signature
+        let public_key_bytes = match hex::decode(&signed_request.pubkey) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("Failed to decode public key: {}", e);
+                let response = LatencyResponse {
+                    request_id,
+                    status: 403,
+                    status_text: "Forbidden".to_string(),
+                    latency: 0.0,
+                    node_region: Some(super::node_region::get_node_region()),
+                    node_id: node_id.clone(),
+                    error: Some("Invalid public key format".to_string()),
+                };
+                Self::publish_latency_response(response, data_sender, node_id).await?;
+                return Ok(());
+            }
+        };
+
+        let signature_bytes = match hex::decode(&signed_request.sig) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("Failed to decode signature: {}", e);
+                let response = LatencyResponse {
+                    request_id,
+                    status: 403,
+                    status_text: "Forbidden".to_string(),
+                    latency: 0.0,
+                    node_region: Some(super::node_region::get_node_region()),
+                    node_id: node_id.clone(),
+                    error: Some("Invalid signature format".to_string()),
+                };
+                Self::publish_latency_response(response, data_sender, node_id).await?;
+                return Ok(());
+            }
+        };
+
+        // Serialize the data for verification (must match how it was signed)
+        let message = serde_json::to_vec(&signed_request.data)?;
+
+        if let Err(e) = crate::crypto::verify_signature(&public_key_bytes, &message, &signature_bytes) {
+            tracing::error!("❌ Signature verification failed: {}", e);
+            let response = LatencyResponse {
+                request_id,
+                status: 403,
+                status_text: "Forbidden".to_string(),
+                latency: 0.0,
+                node_region: Some(super::node_region::get_node_region()),
+                node_id: node_id.clone(),
+                error: Some("Invalid signature".to_string()),
+            };
+            Self::publish_latency_response(response, data_sender, node_id).await?;
+            return Ok(());
+        }
+
+        tracing::info!("✅ Signature verified for request {}", request_id);
+        tracing::info!("⏱️  Processing latency request {} for URL: {}", request_id, signed_request.data.url);
 
         // Build HTTP client request
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
-        let method = request.method.as_deref().unwrap_or("GET").to_uppercase();
+        let method = signed_request.data.method.as_deref().unwrap_or("GET").to_uppercase();
         let method = match method.as_str() {
             "GET" => reqwest::Method::GET,
             "POST" => reqwest::Method::POST,
@@ -1041,15 +1130,15 @@ impl IrohNetwork {
             _ => reqwest::Method::GET,
         };
 
-        let mut req_builder = client.request(method, &request.url);
+        let mut req_builder = client.request(method, &signed_request.data.url);
         
         // Add headers
-        for (key, value) in request.headers {
+        for (key, value) in signed_request.data.headers {
             req_builder = req_builder.header(&key, &value);
         }
 
         // Add body if present
-        if let Some(body) = request.body {
+        if let Some(body) = signed_request.data.body {
             req_builder = req_builder.body(body);
         }
 
@@ -1067,10 +1156,10 @@ impl IrohNetwork {
                 let _ = resp.text().await;
                 
                 tracing::info!("✅ Latency request {} completed: {} ms (status: {})", 
-                    request.request_id, latency_ms, status);
+                    request_id, latency_ms, status);
 
                 LatencyResponse {
-                    request_id: request.request_id.clone(),
+                    request_id: request_id.clone(),
                     status,
                     status_text,
                     latency: latency_ms,
@@ -1080,10 +1169,10 @@ impl IrohNetwork {
                 }
             }
             Err(e) => {
-                tracing::error!("❌ Latency request {} failed: {}", request.request_id, e);
+                tracing::error!("❌ Latency request {} failed: {}", request_id, e);
                 
                 LatencyResponse {
-                    request_id: request.request_id.clone(),
+                    request_id: request_id.clone(),
                     status: 0,
                     status_text: "Error".to_string(),
                     latency: latency_ms,
@@ -1094,20 +1183,30 @@ impl IrohNetwork {
             }
         };
 
-        // Publish response to process-latency-response topic
+        Self::publish_latency_response(response, data_sender, node_id).await?;
+        Ok(())
+    }
+
+    /// Publish latency response to api-latency topic
+    async fn publish_latency_response(
+        response: impl serde::Serialize,
+        data_sender: Arc<Mutex<GossipSender>>,
+        node_id: String,
+    ) -> Result<()> {
+        // Publish response to api-latency topic
         let response_msg = GossipMessage {
             origin: "local".to_string(),
             broker: node_id.clone(),
             timestamp: chrono::Utc::now().timestamp(),
             message_id: uuid::Uuid::new_v4().to_string(),
-            topic: Some("process-latency-response".to_string()),
+            topic: Some("api-latency".to_string()),
             payload: serde_json::to_vec(&response)?,
         };
 
         let payload = serde_json::to_vec(&response_msg)?;
         data_sender.lock().await.broadcast(payload.into()).await?;
         
-        tracing::info!("📤 Published latency response for request {}", request.request_id);
+        tracing::info!("📤 Published api-latency response");
         Ok(())
     }
 
