@@ -127,6 +127,7 @@ type NodeInfo {
 	discoveredPeers: Int!
 	uptimeSeconds: Int!
 	relayUrl: String
+	region: String!
 }
 
 type PeerInfo {

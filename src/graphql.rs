@@ -221,6 +221,7 @@ pub struct NodeInfo {
     pub discovered_peers: i32,
     pub uptime_seconds: u64,
     pub relay_url: Option<String>,
+    pub region: String,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -1382,6 +1383,9 @@ impl QueryRoot {
         // Get relay URL from context if available
         let relay_url = ctx.data::<String>().ok().cloned();
 
+        // Get node region
+        let region = crate::node_region::get_node_region();
+
         Ok(NodeInfo {
             node_id: node_id.clone(),
             peer_id: node_id,
@@ -1390,6 +1394,7 @@ impl QueryRoot {
             discovered_peers: discovered_peers as i32,
             uptime_seconds,
             relay_url,
+            region,
         })
     }
 
