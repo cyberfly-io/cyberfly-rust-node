@@ -1,6 +1,5 @@
 # Dockerfile for pre-built binaries
 # Build binaries with: cargo build --release --target <target>
-# Using Debian Bookworm to match build environment GLIBC
 FROM debian:bookworm-slim
 
 # Install runtime dependencies
