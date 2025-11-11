@@ -439,7 +439,6 @@ async fn main() -> Result<()> {
 
         // Set the message store on the MQTT bridge so it can store incoming messages
         mqtt_bridge.set_message_store(mqtt_store.clone());
-
         let mqtt_store_clone = mqtt_store.clone();
         let broadcast_clone = message_broadcast_tx.clone();
 
