@@ -15,27 +15,37 @@ on:
 env:
   REGISTRY: docker.io
   BACKEND_IMAGE_NAME: cyberfly/cyberfly_node
+  FRONTEND_IMAGE_NAME: cyberfly/cyberfly_node_ui
 
 jobs:
   build-rust-binaries:
     runs-on: ubuntu-latest
+    container:
+      image: debian:bookworm
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
             arch: amd64
-          - target: aarch64-unknown-linux-musl
+          - target: aarch64-unknown-linux-gnu
             arch: arm64
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build dependencies (including musl for static binaries)
+      # Cache apt packages
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/docker-build-push.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
+      - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl build-essential perl make pkg-config git clang lld musl-tools musl-dev
-
+          apt-get update
+          apt-get install -y curl build-essential perl make gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config libssl-dev git
       # Cache Rust toolchain
       - name: Cache Rust toolchain
         uses: actions/cache@v4
@@ -47,7 +57,6 @@ jobs:
           key: ${{ runner.os }}-rustup-${{ hashFiles('rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-rustup-
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -62,7 +71,6 @@ jobs:
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
-
       # Cache Cargo index (crate versions)
       - name: Cache cargo index
         uses: actions/cache@v4
@@ -71,7 +79,6 @@ jobs:
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-index-
-
       # Cache downloaded crate sources
       - name: Cache cargo git
         uses: actions/cache@v4
@@ -80,101 +87,31 @@ jobs:
           key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-git-
-
-      # Cache compiled dependencies (target directory) - optimized for new build profile
-      # Only include Cargo.lock in key so dependencies don't recompile unless lock file changes
+      # Cache compiled dependencies (target directory)
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
-          path: |
-            target
-            ~/.cargo/.package-cache
-          key: ${{ runner.os }}-cargo-build-v3-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          path: target
+          key: ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-build-v3-${{ matrix.target }}-
-            ${{ runner.os }}-cargo-build-v2-${{ matrix.target }}-
-
-      # Install sccache for faster dependency compilation (before configuring)
-      - name: Install sccache
-        run: |
-          curl -L https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-x86_64-unknown-linux-musl.tar.gz | tar xz
-          sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/local/bin/
-          sudo chmod +x /usr/local/bin/sccache
-          sccache --version
-
-      # Cache sccache BEFORE configuring it (important for restoration)
-      - name: Cache sccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/sccache
-          key: ${{ runner.os }}-sccache-v2-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-sccache-v2-${{ matrix.target }}-
-            ${{ runner.os }}-sccache-${{ matrix.target }}-
-
-      - name: Configure sccache
-        run: |
-          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-          echo "SCCACHE_DIR=$HOME/.cache/sccache" >> $GITHUB_ENV
-          echo "SCCACHE_CACHE_SIZE=2G" >> $GITHUB_ENV
-
-      - name: Setup cross-compilation for ARM64 musl
+            ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-build-${{ matrix.target }}-
+      - name: Setup cross-compilation for ARM64
         if: matrix.arch == 'arm64'
         run: |
-          # Install cross-compilation toolchain for ARM64
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          
-          # Download and setup musl cross-compiler for ARM64
-          wget https://musl.cc/aarch64-linux-musl-cross.tgz
-          tar xzf aarch64-linux-musl-cross.tgz
-          echo "$PWD/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
-          
-          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc" >> $GITHUB_ENV
-          echo "CXX_aarch64_unknown_linux_musl=aarch64-linux-musl-g++" >> $GITHUB_ENV
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc" >> $GITHUB_ENV
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C target-feature=+crt-static" >> $GITHUB_ENV
-
-      - name: Setup x86_64 musl with faster linker
-        if: matrix.arch == 'amd64'
-        run: |
-          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C target-feature=+crt-static -C link-arg=-fuse-ld=lld" >> $GITHUB_ENV
-
-      - name: Check cache status
-        run: |
-          echo "🔍 Checking cache restoration status..."
-          echo "Cargo target directory exists: $([ -d target ] && echo 'YES ✅' || echo 'NO ❌')"
-          echo "sccache directory exists: $([ -d ~/.cache/sccache ] && echo 'YES ✅' || echo 'NO ❌')"
-          if [ -d target ]; then
-            echo "Target directory size: $(du -sh target | cut -f1)"
-          fi
-          if [ -d ~/.cache/sccache ]; then
-            echo "sccache directory size: $(du -sh ~/.cache/sccache | cut -f1)"
-          fi
-          echo "Initial sccache stats:"
-          sccache --show-stats || echo "sccache not configured yet"
-
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
       - name: Build for ${{ matrix.target }}
-        run: |
-          echo "🚀 Building with optimized profile (Fat LTO, opt-level 3)"
-          echo "Target: ${{ matrix.target }}"
-          echo "CPU cores: $(nproc)"
-          cargo build --release --target ${{ matrix.target }} -j$(nproc)
-          
-      - name: Show sccache statistics
-        run: |
-          echo "📊 Final sccache statistics:"
-          sccache --show-stats
+        run: cargo build --release --target ${{ matrix.target }} -j$(nproc)
 
       - name: Strip binary
         run: |
           if [ "${{ matrix.arch }}" = "amd64" ]; then
             strip target/${{ matrix.target }}/release/cyberfly-rust-node
           else
-            aarch64-linux-musl-strip target/${{ matrix.target }}/release/cyberfly-rust-node || \
-            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/cyberfly-rust-node || \
-            strip target/${{ matrix.target }}/release/cyberfly-rust-node || true
+            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/cyberfly-rust-node || true
           fi
-
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -211,7 +148,6 @@ jobs:
           mv bin-arm64/cyberfly-rust-node cyberfly-rust-node-arm64
           chmod +x cyberfly-rust-node-*
           ls -lah cyberfly-rust-node-*
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -235,7 +171,6 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
-
       - name: Build and push Backend Docker image
         uses: docker/build-push-action@v5
         with:
@@ -245,3 +180,47 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+  build-frontend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels) for Frontend
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build and push Frontend Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./web-dashboard
+          file: ./web-dashboard/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
