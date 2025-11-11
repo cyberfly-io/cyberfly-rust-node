@@ -16,6 +16,7 @@ mod sync; // Data synchronization with CRDT
 
 use anyhow::Result;
 use axum::{routing::get, Router};
+use iroh::discovery::pkarr::dht::DhtDiscovery;
 // Arc used in places during runtime; prefix to avoid unused import warning in some builds
 #[allow(unused_imports)]
 use std::sync::Arc;
@@ -138,10 +139,13 @@ async fn main() -> Result<()> {
         std::net::Ipv4Addr::UNSPECIFIED, // 0.0.0.0 - listen on all interfaces
         31001,                           // Fixed port for bootstrap configuration
     );
+    let dht_discovery = DhtDiscovery::builder();
+    let mdns = iroh::discovery::mdns::MdnsDiscovery::builder();
 
     let endpoint = iroh::Endpoint::builder()
-        // TODO: Migrate to new discovery API in iroh 0.94 (unified discovery())
         .secret_key(secret_key)
+        .discovery(dht_discovery)
+        .discovery(mdns)
         .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::empty())) // Enable relay mode
         .bind_addr_v4(bind_addr) // Bind to fixed port 31001 for bootstrap peer connectivity
         .bind()

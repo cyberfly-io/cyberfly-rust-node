@@ -30,11 +30,11 @@ openssl-sys = { version = "0.9", features = ["vendored"] }
 automerge = "0.6"
 
 # IPFS - Using Iroh (modern Rust IPFS implementation)
-# Using compatible versions to avoid dependency conflicts
-iroh = { version = "0.94.0", features = ["discovery-local-network", "discovery-pkarr-dht"] }
-iroh-blobs = "0.96.0"
-iroh-gossip = "0.94.0"
-# iroh-docs = "0.94.0"  # Temporarily disabled due to redb version conflict
+# Updated to 0.95.1 - new relay, error handling, and connection API improvements
+iroh = { version = "0.95", features = ["discovery-local-network", "discovery-pkarr-dht"] }
+iroh-blobs = "0.97"
+iroh-gossip = "0.95"
+# iroh-docs = "0.95"  # Temporarily disabled due to redb version conflict
 dashmap = "6.0"
 
 # MQTT
