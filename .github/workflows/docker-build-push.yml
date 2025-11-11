@@ -19,8 +19,6 @@ env:
 jobs:
   build-rust-binaries:
     runs-on: ubuntu-latest
-    container:
-      image: debian:bookworm
     strategy:
       matrix:
         include:
@@ -33,19 +31,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Cache apt packages
-      - name: Cache apt packages
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/docker-build-push.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-apt-
-
       - name: Install build dependencies (including mold linker for speed)
         run: |
-          apt-get update
-          apt-get install -y curl build-essential perl make gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config libssl-dev git mold clang lld
+          sudo apt-get update
+          sudo apt-get install -y curl build-essential perl make gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config libssl-dev git mold clang lld
 
       # Cache Rust toolchain
       - name: Cache Rust toolchain
@@ -109,8 +98,8 @@ jobs:
       - name: Install sccache
         run: |
           curl -L https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-x86_64-unknown-linux-musl.tar.gz | tar xz
-          mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/local/bin/
-          chmod +x /usr/local/bin/sccache
+          sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/local/bin/
+          sudo chmod +x /usr/local/bin/sccache
           sccache --version
 
       # Cache sccache BEFORE configuring it (important for restoration)
