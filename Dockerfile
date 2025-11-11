@@ -1,12 +1,13 @@
 # Dockerfile for pre-built binaries
 # Build binaries with: cargo build --release --target <target>
-FROM debian:bookworm-slim
+# Using Debian Bullseye (GLIBC 2.31) for better compatibility
+FROM debian:bullseye-slim
 
 # Install runtime dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
+    libssl1.1 \
     && rm -rf /var/lib/apt/lists/* && \
     useradd -m -s /bin/bash cyberfly
 
