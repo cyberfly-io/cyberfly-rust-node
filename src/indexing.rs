@@ -181,7 +181,7 @@ impl SecondaryIndex {
                 let mut result = HashSet::new();
                 for value in values {
                     if let Some(keys) = self.data.get(value) {
-                        result.extend(keys.clone());
+                        result.extend(keys.iter().cloned());
                     }
                 }
                 result
@@ -223,7 +223,7 @@ impl SecondaryIndex {
         for (value_str, keys) in &self.data {
             if let Ok(value) = value_str.parse::<f64>() {
                 if predicate(value) {
-                    result.extend(keys.clone());
+                    result.extend(keys.iter().cloned());
                 }
             }
         }
@@ -238,7 +238,7 @@ impl SecondaryIndex {
         let mut result = HashSet::new();
         for (value_str, keys) in &self.data {
             if predicate(value_str) {
-                result.extend(keys.clone());
+                result.extend(keys.iter().cloned());
             }
         }
         result

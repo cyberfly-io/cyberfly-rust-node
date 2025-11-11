@@ -38,6 +38,10 @@ pub enum DbError {
     #[error("Internal error: {0}")]
     InternalError(String),
     
+    // Optimized static error variant - no heap allocation
+    #[error("{0}")]
+    StaticError(&'static str),
+    
     // New enhanced error types
     #[error("Sync operation failed: {0}")]
     SyncError(String),
@@ -64,6 +68,7 @@ impl DbError {
             DbError::ResourceExhausted(_) => true,
             DbError::SyncError(_) => true,
             DbError::StorageError(_) => true, // Most storage errors are transient
+            DbError::StaticError(_) => false, // Static errors are usually unrecoverable
             _ => false,
         }
     }

@@ -541,11 +541,11 @@ impl IrohNetwork {
                 }
             });
         }
-        // Get clones for the event loop
+        // Get references for the event loop (no clones needed - already Arc-wrapped)
         let data_sender_clone = self.data_sender.clone().unwrap();
-        let libp2p_to_mqtt_tx = self.libp2p_to_mqtt_tx.clone();
-        let event_tx = self.event_tx.clone();
-        let discovered_peers = self.discovered_peers.clone();
+        let libp2p_to_mqtt_tx = &self.libp2p_to_mqtt_tx;
+        let event_tx = &self.event_tx;
+        let discovered_peers = &self.discovered_peers;
 
         // Convert receivers to streams (no need to Box them - they're already streamable)
         let mut data_stream = data_receiver;
@@ -562,9 +562,9 @@ impl IrohNetwork {
                                 event, 
                                 "data", 
                                 node_id, 
-                                &event_tx,
-                                &libp2p_to_mqtt_tx,
-                                &discovered_peers,
+                                event_tx,
+                                libp2p_to_mqtt_tx,
+                                discovered_peers,
                                 &data_sender_clone,
                             ).await {
                                 tracing::error!("Error handling data gossip event: {}", e);
@@ -588,9 +588,9 @@ impl IrohNetwork {
                                 event, 
                                 "discovery", 
                                 node_id,
-                                &event_tx,
-                                &libp2p_to_mqtt_tx,
-                                &discovered_peers,
+                                event_tx,
+                                libp2p_to_mqtt_tx,
+                                discovered_peers,
                                 &data_sender_clone,
                             ).await {
                                 tracing::error!("Error handling discovery gossip event: {}", e);
@@ -609,7 +609,7 @@ impl IrohNetwork {
                 event_result = sync_stream.next() => {
                     match event_result {
                         Some(Ok(event)) => {
-                            if let Err(e) = Self::handle_sync_event(event, node_id, &event_tx, &discovered_peers).await {
+                            if let Err(e) = Self::handle_sync_event(event, node_id, event_tx, discovered_peers).await {
                                 tracing::error!("Error handling sync gossip event: {}", e);
                             }
                         }

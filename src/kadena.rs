@@ -169,7 +169,7 @@ impl NodeRegistry {
                 let status_str = status.as_str().unwrap_or("");
                 
                 if status_str == "success" {
-                    // Node exists - parse the data
+                    // Node exists - parse the data (no clone needed - serde_json::from_value consumes)
                     if let Some(data) = result.get("data") {
                         match serde_json::from_value::<NodeStatus>(data.clone()) {
                             Ok(node_status) => {

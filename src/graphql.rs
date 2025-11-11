@@ -320,7 +320,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| {
                 metrics::GRAPHQL_ERRORS.with_label_values(&["get_string"]).inc();
-                DbError::InternalError(STORAGE_NOT_FOUND.to_string())
+                DbError::StaticError(STORAGE_NOT_FOUND)
             })?;
 
         let full_key = format!("{}:{}", db_name, key);
@@ -340,7 +340,7 @@ impl QueryRoot {
     ) -> Result<Vec<StringEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let items = storage.get_all_strings(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -348,7 +348,7 @@ impl QueryRoot {
             .map(|(k, v, meta)| StringEntryGql {
                 key: k,
                 value: v,
-                public_key: meta.clone().map(|m| m.public_key),
+                public_key: meta.as_ref().map(|m| m.public_key.clone()),
                 signature: meta.map(|m| m.signature),
             })
             .collect())
@@ -362,7 +362,7 @@ impl QueryRoot {
     ) -> Result<Vec<HashEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let items = storage.get_all_hashes(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -370,7 +370,7 @@ impl QueryRoot {
             .map(|(k, fields, meta)| HashEntryGql {
                 key: k,
                 fields: async_graphql::Json(serde_json::to_value(fields).unwrap_or(serde_json::Value::Null)),
-                public_key: meta.clone().map(|m| m.public_key),
+                public_key: meta.as_ref().map(|m| m.public_key.clone()),
                 signature: meta.map(|m| m.signature),
             })
             .collect())
@@ -384,7 +384,7 @@ impl QueryRoot {
     ) -> Result<Vec<ListEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let items = storage.get_all_lists(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -392,7 +392,7 @@ impl QueryRoot {
             .map(|(k, items_vec, meta)| ListEntryGql {
                 key: k,
                 items: async_graphql::Json(serde_json::to_value(items_vec).unwrap_or(serde_json::Value::Null)),
-                public_key: meta.clone().map(|m| m.public_key),
+                public_key: meta.as_ref().map(|m| m.public_key.clone()),
                 signature: meta.map(|m| m.signature),
             })
             .collect())
@@ -406,7 +406,7 @@ impl QueryRoot {
     ) -> Result<Vec<SetEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let items = storage.get_all_sets(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -414,7 +414,7 @@ impl QueryRoot {
             .map(|(k, members, meta)| SetEntryGql {
                 key: k,
                 members: async_graphql::Json(serde_json::to_value(members).unwrap_or(serde_json::Value::Null)),
-                public_key: meta.clone().map(|m| m.public_key),
+                public_key: meta.as_ref().map(|m| m.public_key.clone()),
                 signature: meta.map(|m| m.signature),
             })
             .collect())
@@ -428,7 +428,7 @@ impl QueryRoot {
     ) -> Result<Vec<SortedSetEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let items = storage.get_all_sorted_sets(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -436,7 +436,7 @@ impl QueryRoot {
             .map(|(k, members, meta)| SortedSetEntryGql {
                 key: k,
                 members: async_graphql::Json(serde_json::to_value(members).unwrap_or(serde_json::Value::Null)),
-                public_key: meta.clone().map(|m| m.public_key),
+                public_key: meta.as_ref().map(|m| m.public_key.clone()),
                 signature: meta.map(|m| m.signature),
             })
             .collect())
@@ -460,7 +460,7 @@ impl QueryRoot {
     ) -> Result<Vec<StreamEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let items = storage.get_all_stream_entries(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -468,7 +468,7 @@ impl QueryRoot {
             .map(|(k, entries, meta)| StreamEntryGql {
                 key: k,
                 entries: async_graphql::Json(serde_json::to_value(entries).unwrap_or(serde_json::Value::Null)),
-                public_key: meta.clone().map(|m| m.public_key),
+                public_key: meta.as_ref().map(|m| m.public_key.clone()),
                 signature: meta.map(|m| m.signature),
             })
             .collect())
@@ -482,7 +482,7 @@ impl QueryRoot {
     ) -> Result<Vec<TimeSeriesEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let items = storage.get_all_timeseries(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -490,7 +490,7 @@ impl QueryRoot {
             .map(|(k, points, meta)| TimeSeriesEntryGql {
                 key: k,
                 points: async_graphql::Json(serde_json::to_value(points).unwrap_or(serde_json::Value::Null)),
-                public_key: meta.clone().map(|m| m.public_key),
+                public_key: meta.as_ref().map(|m| m.public_key.clone()),
                 signature: meta.map(|m| m.signature),
             })
             .collect())
@@ -504,7 +504,7 @@ impl QueryRoot {
     ) -> Result<Vec<GeoEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let items = storage.get_all_geo(&db_name).await.map_err(DbError::from)?;
         Ok(items
@@ -512,7 +512,7 @@ impl QueryRoot {
             .map(|(k, locs, meta)| GeoEntryGql {
                 key: k,
                 locations: async_graphql::Json(serde_json::to_value(locs).unwrap_or(serde_json::Value::Null)),
-                public_key: meta.clone().map(|m| m.public_key),
+                public_key: meta.as_ref().map(|m| m.public_key.clone()),
                 signature: meta.map(|m| m.signature),
             })
             .collect())
@@ -528,7 +528,7 @@ impl QueryRoot {
     ) -> Result<QueryResult, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let value = storage
@@ -551,7 +551,7 @@ impl QueryRoot {
     ) -> Result<Vec<QueryResult>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let fields = storage
@@ -579,7 +579,7 @@ impl QueryRoot {
     ) -> Result<Vec<String>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let start = start.unwrap_or(0) as isize;
@@ -600,7 +600,7 @@ impl QueryRoot {
     ) -> Result<Vec<String>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         storage.get_set(&full_key).await.map_err(DbError::from)
@@ -617,7 +617,7 @@ impl QueryRoot {
     ) -> Result<Vec<SortedSetEntry>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let start = start.unwrap_or(0) as isize;
@@ -637,7 +637,7 @@ impl QueryRoot {
     async fn get_ipfs_file(&self, ctx: &Context<'_>, cid: String) -> Result<String, DbError> {
         let ipfs = ctx
             .data::<IpfsStorage>()
-            .map_err(|_| DbError::InternalError(IPFS_STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(IPFS_STORAGE_NOT_FOUND))?;
 
         // Use get_bytes (cid is actually a hash string in Iroh)
         let data = ipfs
@@ -655,7 +655,7 @@ impl QueryRoot {
     async fn list_ipfs_pins(&self, ctx: &Context<'_>) -> Result<Vec<String>, DbError> {
         let _ipfs = ctx
             .data::<IpfsStorage>()
-            .map_err(|_| DbError::InternalError(IPFS_STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(IPFS_STORAGE_NOT_FOUND))?;
 
         // TODO: Implement listing all stored blobs in Iroh
         // For now, return empty list
@@ -674,7 +674,7 @@ impl QueryRoot {
     ) -> Result<QueryResult, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let value = storage
@@ -698,7 +698,7 @@ impl QueryRoot {
     ) -> Result<QueryResult, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let value = storage
@@ -720,7 +720,7 @@ impl QueryRoot {
     ) -> Result<Vec<JsonWithMeta>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let items = storage
             .get_all_json_with_meta(&db_name)
@@ -753,7 +753,7 @@ impl QueryRoot {
     ) -> Result<Vec<StoredEntryGql>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let items = storage.get_all(&db_name).await.map_err(DbError::from)?;
 
@@ -763,7 +763,7 @@ impl QueryRoot {
                 key: entry.key,
                 store_type: format!("{:?}", entry.store_type),
                 value: async_graphql::Json(entry.value),
-                public_key: entry.metadata.clone().map(|m| m.public_key),
+                public_key: entry.metadata.as_ref().map(|m| m.public_key.clone()),
                 signature: entry.metadata.map(|m| m.signature),
             })
             .collect();
@@ -785,7 +785,7 @@ impl QueryRoot {
     ) -> Result<Vec<StreamEntry>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let start = start.as_deref().unwrap_or("-");
@@ -821,7 +821,7 @@ impl QueryRoot {
     ) -> Result<Vec<StreamEntry>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let start = start.as_deref().unwrap_or("-");
@@ -853,7 +853,7 @@ impl QueryRoot {
     ) -> Result<i32, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let length = storage.xlen(&full_key).await.map_err(DbError::from)?;
@@ -874,15 +874,15 @@ impl QueryRoot {
     ) -> Result<Vec<TimeSeriesPoint>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let from_ts = from_timestamp
             .parse::<i64>()
-            .map_err(|_| DbError::InvalidData("Invalid from_timestamp".to_string()))?;
+            .map_err(|_| DbError::StaticError("Invalid from_timestamp"))?;
         let to_ts = to_timestamp
             .parse::<i64>()
-            .map_err(|_| DbError::InvalidData("Invalid to_timestamp".to_string()))?;
+            .map_err(|_| DbError::StaticError("Invalid to_timestamp"))?;
 
         let data = storage
             .ts_range(&full_key, from_ts, to_ts)
@@ -911,15 +911,15 @@ impl QueryRoot {
     ) -> Result<Vec<TimeSeriesPoint>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let from_ts = from_timestamp
             .parse::<i64>()
-            .map_err(|_| DbError::InvalidData("Invalid from_timestamp".to_string()))?;
+            .map_err(|_| DbError::StaticError("Invalid from_timestamp"))?;
         let to_ts = to_timestamp
             .parse::<i64>()
-            .map_err(|_| DbError::InvalidData("Invalid to_timestamp".to_string()))?;
+            .map_err(|_| DbError::StaticError("Invalid to_timestamp"))?;
 
         let data = storage
             .filter_timeseries(&full_key, from_ts, to_ts, min_value, max_value)
@@ -944,7 +944,7 @@ impl QueryRoot {
     ) -> Result<Option<TimeSeriesPoint>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let data = storage.ts_get(&full_key).await.map_err(DbError::from)?;
@@ -967,7 +967,7 @@ impl QueryRoot {
     ) -> Result<Option<GeoLocation>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let pos = storage
@@ -995,7 +995,7 @@ impl QueryRoot {
     ) -> Result<Vec<GeoResult>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let unit_str = unit.as_deref().unwrap_or("m");
@@ -1026,7 +1026,7 @@ impl QueryRoot {
     ) -> Result<Vec<GeoResult>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let unit_str = unit.as_deref().unwrap_or("m");
@@ -1057,7 +1057,7 @@ impl QueryRoot {
     ) -> Result<Option<f64>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
 
@@ -1079,7 +1079,7 @@ impl QueryRoot {
     ) -> Result<Vec<QueryResult>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let fields = storage
@@ -1106,7 +1106,7 @@ impl QueryRoot {
     ) -> Result<Vec<String>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         storage
@@ -1125,7 +1125,7 @@ impl QueryRoot {
     ) -> Result<Vec<String>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         storage
@@ -1145,7 +1145,7 @@ impl QueryRoot {
     ) -> Result<Vec<SortedSetEntry>, DbError> {
         let storage = ctx
             .data::<RedisStorage>()
-            .map_err(|_| DbError::InternalError(STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
         let full_key = format!("{}:{}", db_name, key);
         let results = storage
@@ -1529,7 +1529,7 @@ impl MutationRoot {
             .data::<RedisStorage>()
             .map_err(|_| {
                 metrics::GRAPHQL_ERRORS.with_label_values(&["submit_data"]).inc();
-                DbError::InternalError(STORAGE_NOT_FOUND.to_string())
+                DbError::StaticError(STORAGE_NOT_FOUND)
             })?;
 
         // Enhanced database name verification with security checks
@@ -1787,7 +1787,7 @@ impl MutationRoot {
     async fn add_to_ipfs(&self, ctx: &Context<'_>, data: String) -> Result<IpfsResult, DbError> {
         let ipfs = ctx
             .data::<IpfsStorage>()
-            .map_err(|_| DbError::InternalError(IPFS_STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(IPFS_STORAGE_NOT_FOUND))?;
 
         let bytes = data.as_bytes();
         let cid = ipfs
@@ -1807,7 +1807,7 @@ impl MutationRoot {
     async fn pin_ipfs(&self, ctx: &Context<'_>, cid: String) -> Result<IpfsResult, DbError> {
         let _ipfs = ctx
             .data::<IpfsStorage>()
-            .map_err(|_| DbError::InternalError(IPFS_STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(IPFS_STORAGE_NOT_FOUND))?;
 
         // No-op in Iroh - content is already persistent
         Ok(IpfsResult {
@@ -1825,7 +1825,7 @@ impl MutationRoot {
     async fn unpin_ipfs(&self, ctx: &Context<'_>, cid: String) -> Result<IpfsResult, DbError> {
         let _ipfs = ctx
             .data::<IpfsStorage>()
-            .map_err(|_| DbError::InternalError(IPFS_STORAGE_NOT_FOUND.to_string()))?;
+            .map_err(|_| DbError::StaticError(IPFS_STORAGE_NOT_FOUND))?;
 
         // No-op in Iroh
         Ok(IpfsResult {
