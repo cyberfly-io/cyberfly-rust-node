@@ -43,7 +43,8 @@ A decentralized, peer-to-peer database built with Rust featuring embedded Sled s
   - **Transports**: QUIC support with efficient data transfer
   - **Gossip Protocol**: Decentralized message propagation
   - **Blob Storage**: Content-addressed storage for files and operation logs
-  - **N0 Discovery**: Automatic peer discovery
+  - **Automatic Peer Discovery**: Gossip-based full mesh topology (broadcasts every 10s)
+  - **Self-Healing Network**: Nodes automatically discover and connect to all peers
   - **Connection Health**: Built-in connection monitoring
 - **🤖 IoT Integration**: MQTT bridge for bidirectional communication with IoT devices
   - **Cross-machine MQTT broadcasting** - Messages propagate to all connected peers via gossip
@@ -826,10 +827,36 @@ RUST_LOG=debug cargo run
 
 ## Network Topology
 
-- **Gossipsub**: Pub/sub messaging for data propagation
-- **mDNS**: Local peer discovery
-- **Kademlia DHT**: Distributed hash table for peer routing
-- **Identify**: Peer identification protocol
+The network uses Iroh's modern P2P stack with automatic peer discovery:
+
+- **Gossip Protocol**: Four dedicated topics for different message types:
+  - `data`: Application data propagation
+  - `discovery`: Peer discovery beacons
+  - `sync`: CRDT synchronization messages
+  - `peer-discovery`: **Automatic full mesh connectivity** (NEW!)
+- **Peer Discovery Protocol**: Every 10 seconds, nodes broadcast their connected peer lists
+  - Enables automatic full mesh topology without manual configuration
+  - Self-healing: new nodes quickly discover all existing peers
+  - Region-aware announcements for potential optimization
+  - See [PEER_DISCOVERY_PROTOCOL.md](PEER_DISCOVERY_PROTOCOL.md) for details
+- **QUIC Transport**: Fast, reliable connections with built-in encryption
+- **Content Addressing**: Blake3-based hashing for immutable data storage
+- **Bootstrap Peers**: Initial connection points for joining the network
+
+### Testing Full Mesh Peer Discovery
+
+Run the automated test script to see peer discovery in action:
+
+```bash
+./test-peer-discovery.sh
+```
+
+This starts 3 nodes:
+1. Node 1 acts as bootstrap
+2. Node 2 connects to Node 1
+3. Node 3 connects to Node 1
+4. Within 10 seconds, Node 2 and Node 3 discover and connect to each other automatically
+5. Result: Full mesh topology (all nodes connected to all other nodes)
 
 ## Security
 
@@ -844,6 +871,7 @@ The system uses Automerge for automatic conflict resolution when the same key is
 
 ## Additional Documentation
 
+- **[PEER_DISCOVERY_PROTOCOL.md](PEER_DISCOVERY_PROTOCOL.md)**: Automatic full mesh peer discovery protocol
 - **[EXAMPLES.md](EXAMPLES.md)**: Comprehensive usage examples for all data types and IoT integration
 - **[IPFS_METADATA.md](IPFS_METADATA.md)**: Detailed guide for IPFS file metadata storage with helia-json
 - **[FILE_OWNERSHIP.md](FILE_OWNERSHIP.md)**: Complete guide to file ownership verification and secure deletion
@@ -864,6 +892,7 @@ The system uses Automerge for automatic conflict resolution when the same key is
 - [x] Secure file deletion with cryptographic proof
 - [x] MQTT bridge for IoT integration
 - [x] Three-layer loop prevention system
+- [x] Automatic peer discovery with full mesh topology
 - [ ] Add authentication for GraphQL API
 - [ ] GraphQL mutations for file upload/deletion
 - [ ] Implement data replication policies using CRDT

@@ -43,6 +43,76 @@ struct GossipMessage {
     payload: Vec<u8>,
 }
 
+/// Peer discovery announcement message
+/// Broadcasts list of connected peers to enable full mesh topology
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PeerDiscoveryAnnouncement {
+    /// Node ID of the sender
+    node_id: String,
+    /// List of connected peer IDs (EndpointIds as hex strings)
+    connected_peers: Vec<String>,
+    /// Unix timestamp when announcement was created
+    timestamp: i64,
+    /// Region of the announcing node
+    region: String,
+    /// Ed25519 signature of the announcement (node_id + timestamp + peers)
+    signature: String,
+}
+
+impl PeerDiscoveryAnnouncement {
+    /// Create and sign a new peer announcement
+    fn new(
+        node_id: EndpointId,
+        connected_peers: Vec<String>,
+        region: String,
+        secret_key: &iroh::SecretKey,
+    ) -> Self {
+        let timestamp = chrono::Utc::now().timestamp();
+        
+        // Create message to sign: node_id + timestamp + sorted peers
+        let mut peers_sorted = connected_peers.clone();
+        peers_sorted.sort();
+        let message = format!("{}:{}:{}", node_id, timestamp, peers_sorted.join(","));
+        
+        // Sign with node's secret key
+        let signature_obj = secret_key.sign(message.as_bytes());
+        let signature = hex::encode(signature_obj.to_bytes());
+        
+        Self {
+            node_id: node_id.to_string(),
+            connected_peers,
+            timestamp,
+            region,
+            signature,
+        }
+    }
+    
+    /// Verify the signature of an announcement
+    fn verify(&self, node_id: EndpointId, public_key: &iroh::PublicKey) -> bool {
+        // Reconstruct the message
+        let mut peers_sorted = self.connected_peers.clone();
+        peers_sorted.sort();
+        let message = format!("{}:{}:{}", self.node_id, self.timestamp, peers_sorted.join(","));
+        
+        // Decode signature
+        let signature_bytes = match hex::decode(&self.signature) {
+            Ok(bytes) => bytes,
+            Err(_) => return false,
+        };
+        
+        // Convert to fixed-size array for Signature type
+        let signature_array: [u8; 64] = match signature_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => return false,
+        };
+        
+        let signature = iroh::Signature::from_bytes(&signature_array);
+        
+        // Verify signature
+        public_key.verify(message.as_bytes(), &signature).is_ok()
+    }
+}
+
 mod base64_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
     use base64::{Engine as _, engine::general_purpose};
@@ -92,12 +162,16 @@ pub struct IrohNetwork {
     data_topic: TopicId,
     discovery_topic: TopicId,
     sync_topic: TopicId,  // New topic for data sync
+    peer_discovery_topic: TopicId,  // New topic for peer list announcements
     // Senders for broadcasting (set after subscribing)
     data_sender: Option<Arc<Mutex<GossipSender>>>,
     discovery_sender: Option<Arc<Mutex<GossipSender>>>,
     sync_sender: Option<Arc<Mutex<GossipSender>>>,  // Sync topic sender
+    peer_discovery_sender: Option<Arc<Mutex<GossipSender>>>,  // Peer discovery sender
     // Simple peer tracking - stores peers seen in gossip messages
     discovered_peers: Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
+    // Peer announcement cache - prevents reconnection loops
+    peer_announcement_cache: Arc<dashmap::DashMap<String, i64>>,  // node_id -> last_timestamp
     // Bootstrap peers for initial gossip network join
     bootstrap_peers: Vec<EndpointId>,
     // Original bootstrap peer strings (with addresses)
@@ -202,6 +276,7 @@ impl IrohNetwork {
         let data_topic = TopicId::from_bytes(*b"decentralized-db-data-v1-iroh!!!");
         let discovery_topic = TopicId::from_bytes(*b"decentralized-db-discovery-iroh!");
         let sync_topic = TopicId::from_bytes(*b"decentralized-db-sync-v1-iroh!!!");
+        let peer_discovery_topic = TopicId::from_bytes(*b"decentralized-peer-list-v1-iroh!");
         
         // Parse bootstrap peers (includes hardcoded peer, filtered by local node_id)
         let bootstrap_peers = Self::parse_bootstrap_peers(&bootstrap_peer_strings, node_id);
@@ -222,10 +297,13 @@ impl IrohNetwork {
             data_topic,
             discovery_topic,
             sync_topic,
+            peer_discovery_topic,
             data_sender: None,
             discovery_sender: None,
             sync_sender: None,
+            peer_discovery_sender: None,
             discovered_peers: Arc::new(dashmap::DashMap::new()),
+            peer_announcement_cache: Arc::new(dashmap::DashMap::new()),
             bootstrap_peers,
             bootstrap_peer_strings,
         }
@@ -392,6 +470,12 @@ impl IrohNetwork {
         self.sync_sender = Some(Arc::new(Mutex::new(sync_sender)));
         tracing::info!("Subscribed to sync topic");
 
+        // Subscribe to peer discovery topic with bootstrap peers
+        let peer_discovery_topic = self.gossip.subscribe(self.peer_discovery_topic, bootstrap_peers.clone()).await?;
+        let (peer_discovery_sender, peer_discovery_receiver) = peer_discovery_topic.split();
+        self.peer_discovery_sender = Some(Arc::new(Mutex::new(peer_discovery_sender)));
+        tracing::info!("Subscribed to peer discovery topic");
+
         // Wait for peers to join before starting broadcasts (following iroh-gossip best practices)
         if !bootstrap_peers.is_empty() {
             tracing::info!("Waiting for peers to join gossip network...");
@@ -410,6 +494,91 @@ impl IrohNetwork {
 
         // Get node_id first before using in beacon task
         let node_id = self.node_id;
+        let secret_key = self.endpoint.secret_key().clone();
+
+        // Start peer list announcement task - broadcasts connected peers every 10 seconds
+        // This enables full mesh topology by sharing peer lists across the network
+        let peer_list_sender = Arc::clone(self.peer_discovery_sender.as_ref().unwrap());
+        let peer_list_node_id = node_id;
+        let peer_list_discovered_peers = Arc::clone(&self.discovered_peers);
+        let peer_list_secret_key = secret_key.clone();
+        tokio::spawn(async move {
+            // Wait before starting announcements to allow gossip network to stabilize
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                
+                // Get current list of connected peers
+                let connected_peers: Vec<String> = peer_list_discovered_peers
+                    .iter()
+                    .map(|entry| entry.key().to_string())
+                    .collect();
+                
+                // Create signed peer announcement
+                let announcement = PeerDiscoveryAnnouncement::new(
+                    peer_list_node_id,
+                    connected_peers.clone(),
+                    crate::node_region::get_node_region(),
+                    &peer_list_secret_key,
+                );
+                
+                if let Ok(announcement_bytes) = serde_json::to_vec(&announcement) {
+                    let sender = peer_list_sender.lock().await;
+                    if let Err(e) = sender.broadcast(announcement_bytes.into()).await {
+                        tracing::debug!("Peer list announcement broadcast error: {}", e);
+                    } else {
+                        tracing::debug!(
+                            "📡 Broadcasted signed peer list: {} connected peers from region {}",
+                            connected_peers.len(),
+                            announcement.region
+                        );
+                    }
+                }
+            }
+        });
+        tracing::info!("🌐 Started peer discovery protocol with cryptographic signatures (broadcasts every 10s)");
+
+        // Start peer expiration cleanup task - removes inactive peers every 10 seconds
+        let cleanup_discovered_peers = Arc::clone(&self.discovered_peers);
+        let expiration_timeout = std::time::Duration::from_secs(30); // 30 second timeout
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                
+                let now = chrono::Utc::now();
+                let mut expired_count = 0;
+                
+                // Collect expired peers
+                let expired_peers: Vec<EndpointId> = cleanup_discovered_peers
+                    .iter()
+                    .filter_map(|entry| {
+                        let last_seen = *entry.value();
+                        let duration_since = now.signed_duration_since(last_seen);
+                        
+                        if duration_since.num_seconds() > expiration_timeout.as_secs() as i64 {
+                            Some(*entry.key())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                
+                // Remove expired peers
+                for peer_id in expired_peers {
+                    cleanup_discovered_peers.remove(&peer_id);
+                    expired_count += 1;
+                    tracing::info!("🕒 Removed expired peer: {}", peer_id);
+                }
+                
+                if expired_count > 0 {
+                    tracing::info!("🧹 Cleaned up {} expired peer(s)", expired_count);
+                }
+            }
+        });
+        tracing::info!("🧹 Started peer expiration cleanup (checks every 10s, timeout: 30s)");
 
         // Start a peer discovery broadcast task (only after successful gossip join)
         // This helps peers find each other by periodically sending discovery beacons
@@ -546,11 +715,14 @@ impl IrohNetwork {
         let libp2p_to_mqtt_tx = &self.libp2p_to_mqtt_tx;
         let event_tx = &self.event_tx;
         let discovered_peers = &self.discovered_peers;
+        let peer_announcement_cache = &self.peer_announcement_cache;
+        let endpoint_for_dial = &self.endpoint;
 
         // Convert receivers to streams (no need to Box them - they're already streamable)
         let mut data_stream = data_receiver;
         let mut discovery_stream = discovery_receiver;
         let mut sync_stream = sync_receiver;
+        let mut peer_discovery_stream = peer_discovery_receiver;
 
         loop {
             tokio::select! {
@@ -618,6 +790,29 @@ impl IrohNetwork {
                         }
                         None => {
                             tracing::warn!("Sync stream ended");
+                        }
+                    }
+                }
+
+                // Handle peer discovery announcements
+                event_result = peer_discovery_stream.next() => {
+                    match event_result {
+                        Some(Ok(event)) => {
+                            if let Err(e) = Self::handle_peer_discovery_event(
+                                event,
+                                node_id,
+                                discovered_peers,
+                                peer_announcement_cache,
+                                endpoint_for_dial,
+                            ).await {
+                                tracing::error!("Error handling peer discovery event: {}", e);
+                            }
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!("Error reading peer discovery stream: {}", e);
+                        }
+                        None => {
+                            tracing::warn!("Peer discovery stream ended");
                         }
                     }
                 }
@@ -715,6 +910,135 @@ impl IrohNetwork {
             }
         }
 
+        Ok(())
+    }
+
+    /// Handle peer discovery announcement events
+    /// Processes peer lists from other nodes and automatically connects to unknown peers
+    async fn handle_peer_discovery_event(
+        event: GossipEvent,
+        node_id: EndpointId,
+        discovered_peers: &Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
+        peer_announcement_cache: &Arc<dashmap::DashMap<String, i64>>,
+        endpoint: &Endpoint,
+    ) -> Result<()> {
+        match event {
+            GossipEvent::Received(msg) => {
+                let from = msg.delivered_from;
+                
+                // Ignore our own messages
+                if from == node_id {
+                    return Ok(());
+                }
+                
+                // Parse peer discovery announcement
+                match serde_json::from_slice::<PeerDiscoveryAnnouncement>(&msg.content) {
+                    Ok(announcement) => {
+                        // Verify the announcing node ID matches the sender
+                        let announced_node_id = match announcement.node_id.parse::<EndpointId>() {
+                            Ok(id) => id,
+                            Err(e) => {
+                                tracing::warn!("Invalid node ID in announcement: {}", e);
+                                return Ok(());
+                            }
+                        };
+                        
+                        if announced_node_id != from {
+                            tracing::warn!(
+                                "Node ID mismatch: announced {} but message from {}",
+                                announced_node_id,
+                                from
+                            );
+                            return Ok(());
+                        }
+                        
+                        // Get the public key for signature verification
+                        let public_key = iroh::PublicKey::from(from);
+                        
+                        // Verify the signature
+                        if !announcement.verify(from, &public_key) {
+                            tracing::warn!(
+                                "Invalid signature from {} - ignoring announcement",
+                                from
+                            );
+                            return Ok(());
+                        }
+                        
+                        // Check if we've seen this announcement recently (deduplication)
+                        let cache_key = format!("{}:{}", announcement.node_id, announcement.timestamp);
+                        if let Some(last_ts) = peer_announcement_cache.get(&announcement.node_id) {
+                            if *last_ts >= announcement.timestamp {
+                                // Already processed this or a newer announcement
+                                return Ok(());
+                            }
+                        }
+                        
+                        // Update cache
+                        peer_announcement_cache.insert(announcement.node_id.clone(), announcement.timestamp);
+                        
+                        // Track the announcing peer
+                        discovered_peers.insert(from, chrono::Utc::now());
+                        
+                        tracing::info!(
+                            "📋 Received verified peer list from {} (region: {}): {} peers",
+                            announcement.node_id,
+                            announcement.region,
+                            announcement.connected_peers.len()
+                        );
+                        
+                        // Attempt to connect to unknown peers
+                        let mut new_connections = 0;
+                        for peer_id_str in &announcement.connected_peers {
+                            // Parse peer ID
+                            if let Ok(peer_id) = peer_id_str.parse::<EndpointId>() {
+                                // Skip if it's our own ID
+                                if peer_id == node_id {
+                                    continue;
+                                }
+                                
+                                // Skip if already connected
+                                if discovered_peers.contains_key(&peer_id) {
+                                    continue;
+                                }
+                                
+                                // Attempt to connect to this peer
+                                tracing::info!("🔗 Attempting to connect to peer {} (discovered via {})", peer_id, announcement.node_id);
+                                
+                                match endpoint.connect(peer_id, iroh_gossip::ALPN).await {
+                                    Ok(_conn) => {
+                                        discovered_peers.insert(peer_id, chrono::Utc::now());
+                                        new_connections += 1;
+                                        tracing::info!("✓ Successfully connected to peer {}", peer_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!("Failed to connect to peer {}: {}", peer_id, e);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if new_connections > 0 {
+                            tracing::info!("✓ Established {} new peer connection(s) via discovery", new_connections);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to parse peer discovery announcement: {}", e);
+                    }
+                }
+            }
+            GossipEvent::NeighborUp(peer_node_id) => {
+                tracing::debug!("Peer discovery neighbor up: {}", peer_node_id);
+                discovered_peers.insert(peer_node_id, chrono::Utc::now());
+            }
+            GossipEvent::NeighborDown(peer_node_id) => {
+                tracing::debug!("Peer discovery neighbor down: {}", peer_node_id);
+                discovered_peers.remove(&peer_node_id);
+            }
+            GossipEvent::Lagged => {
+                tracing::warn!("Peer discovery gossip lagged - missed messages");
+            }
+        }
+        
         Ok(())
     }
 
