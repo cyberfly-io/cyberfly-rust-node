@@ -2,7 +2,7 @@
 // Replaces libp2p with Iroh's Endpoint + Router + Gossip + Blobs
 
 use anyhow::Result;
-use iroh::{Endpoint, EndpointId, EndpointAddr, TransportAddr, SecretKey, protocol::Router};
+use iroh::{Endpoint, EndpointId, EndpointAddr, TransportAddr, SecretKey, protocol::Router, Watcher};
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_gossip::{
     net::Gossip, 
@@ -369,7 +369,7 @@ impl IrohNetwork {
         tracing::info!("MQTT bridge connected to Iroh network");
     }
 
-    /// Add bootstrap peer addresses to endpoint's address book
+    /// Add bootstrap peer addresses to endpoint's address book with retry logic
     async fn add_bootstrap_addresses(&self, peer_strings: &[String]) -> Result<()> {
         use std::net::SocketAddr;
         
@@ -379,6 +379,9 @@ impl IrohNetwork {
         // Combine hardcoded peer with configured peers
         let mut all_peers: Vec<String> = vec![HARDCODED_BOOTSTRAP.to_string()];
         all_peers.extend(peer_strings.iter().cloned());
+        
+        // Spawn connection attempts in parallel to speed up bootstrap
+        let mut connection_tasks = Vec::new();
         
         for peer_str in &all_peers {
             let peer_str = peer_str.trim();
@@ -400,22 +403,19 @@ impl IrohNetwork {
                         
                         match socket_addr_str.parse::<SocketAddr>() {
                             Ok(socket_addr) => {
-                                // Create EndpointAddr with node ID and socket address
-                                let endpoint_addr = EndpointAddr::from_parts(
-                                    node_id,
-                                    [TransportAddr::Ip(socket_addr)],
-                                );
+                                // Clone endpoint for use in async task
+                                let endpoint = self.endpoint.clone();
                                 
-                                // Try to connect using gossip ALPN
-                                tracing::info!("Attempting to connect to bootstrap peer {} at {}", node_id, socket_addr);
-                                match self.endpoint.connect(endpoint_addr, iroh_gossip::ALPN).await {
-                                    Ok(_conn) => {
-                                        tracing::info!("✓ Successfully connected to bootstrap peer {} at {}", node_id, socket_addr);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to connect to bootstrap peer {} at {}: {}", node_id, socket_addr, e);
-                                    }
-                                }
+                                // Spawn retry task for this peer
+                                let task = tokio::spawn(async move {
+                                    Self::connect_bootstrap_peer_with_retry(
+                                        endpoint,
+                                        node_id,
+                                        socket_addr,
+                                    ).await
+                                });
+                                
+                                connection_tasks.push(task);
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to parse socket address '{}': {}", socket_addr_str, e);
@@ -429,7 +429,198 @@ impl IrohNetwork {
             }
         }
         
+        // Wait for all connection attempts to complete (or fail after retries)
+        let results = futures::future::join_all(connection_tasks).await;
+        
+        // Collect successfully connected peers for monitoring
+        let mut connected_bootstrap_peers = Vec::new();
+        for (peer_str, result) in all_peers.iter().zip(results.iter()) {
+            if let Ok(Ok(())) = result {
+                if let Some(at_idx) = peer_str.find('@') {
+                    let node_id_str = &peer_str[..at_idx];
+                    let socket_addr_str = &peer_str[at_idx + 1..];
+                    if let (Ok(node_id), Ok(socket_addr)) = (
+                        node_id_str.parse::<EndpointId>(),
+                        socket_addr_str.parse::<std::net::SocketAddr>()
+                    ) {
+                        connected_bootstrap_peers.push((node_id, socket_addr));
+                    }
+                }
+            }
+        }
+        
+        // Count successful connections
+        let successful_count = results.iter().filter(|r| {
+            matches!(r, Ok(Ok(())))
+        }).count();
+        
+        if successful_count > 0 {
+            tracing::info!("✓ Successfully connected to {}/{} bootstrap peer(s)", successful_count, results.len());
+            
+            // Start connection monitor for bootstrap peers
+            let endpoint = self.endpoint.clone();
+            tokio::spawn(async move {
+                Self::monitor_bootstrap_connections(endpoint, connected_bootstrap_peers).await;
+            });
+        } else {
+            tracing::warn!("⚠️  Failed to connect to any bootstrap peers - will rely on DHT/mDNS discovery");
+        }
+        
         Ok(())
+    }
+    
+    /// Monitor bootstrap peer connections and reconnect if disconnected
+    async fn monitor_bootstrap_connections(
+        endpoint: Endpoint,
+        bootstrap_peers: Vec<(EndpointId, std::net::SocketAddr)>,
+    ) {
+        const CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds
+        const RECONNECT_DELAY_SECS: u64 = 5; // Wait 5 seconds before reconnecting
+        
+        tracing::info!("🔍 Started bootstrap connection monitor (checks every {}s)", CHECK_INTERVAL_SECS);
+        
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(CHECK_INTERVAL_SECS));
+        
+        loop {
+            interval.tick().await;
+            
+            for (node_id, socket_addr) in &bootstrap_peers {
+                // Check if we still have an active connection to this peer
+                // conn_type() returns Option<Watcher<ConnectionType>>
+                let conn_watcher = endpoint.conn_type(*node_id);
+                
+                let is_connected = if let Some(mut watcher) = conn_watcher {
+                    // Check connection type - ConnectionType::None means no connection
+                    use iroh::endpoint::ConnectionType;
+                    !matches!(watcher.get(), ConnectionType::None)
+                } else {
+                    // No watcher means no connection info available
+                    false
+                };
+                
+                if !is_connected {
+                    tracing::warn!(
+                        "⚠️  Bootstrap peer {} at {} disconnected - attempting reconnection",
+                        node_id.fmt_short(),
+                        socket_addr
+                    );
+                    
+                    // Wait a bit before reconnecting to avoid rapid reconnection attempts
+                    tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+                    
+                    // Attempt to reconnect with retry logic
+                    let endpoint_clone = endpoint.clone();
+                    let node_id_clone = *node_id;
+                    let socket_addr_clone = *socket_addr;
+                    
+                    tokio::spawn(async move {
+                        match Self::connect_bootstrap_peer_with_retry(
+                            endpoint_clone,
+                            node_id_clone,
+                            socket_addr_clone,
+                        ).await {
+                            Ok(_) => {
+                                tracing::info!(
+                                    "✅ Successfully reconnected to bootstrap peer {} at {}",
+                                    node_id_clone.fmt_short(),
+                                    socket_addr_clone
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "❌ Failed to reconnect to bootstrap peer {} at {}: {}",
+                                    node_id_clone.fmt_short(),
+                                    socket_addr_clone,
+                                    e
+                                );
+                            }
+                        }
+                    });
+                } else {
+                    tracing::trace!(
+                        "✓ Bootstrap peer {} at {} still connected",
+                        node_id.fmt_short(),
+                        socket_addr
+                    );
+                }
+            }
+        }
+    }
+    
+    /// Connect to a bootstrap peer with exponential backoff retry logic
+    async fn connect_bootstrap_peer_with_retry(
+        endpoint: Endpoint,
+        node_id: EndpointId,
+        socket_addr: std::net::SocketAddr,
+    ) -> Result<()> {
+        const MAX_RETRIES: u32 = 5;
+        const INITIAL_DELAY_MS: u64 = 1000; // 1 second
+        const MAX_DELAY_MS: u64 = 30000; // 30 seconds
+        
+        let mut attempt = 0;
+        let mut delay_ms = INITIAL_DELAY_MS;
+        
+        loop {
+            attempt += 1;
+            
+            // Create EndpointAddr with node ID and socket address
+            let endpoint_addr = EndpointAddr::from_parts(
+                node_id,
+                [TransportAddr::Ip(socket_addr)],
+            );
+            
+            tracing::info!(
+                "🔄 Attempting to connect to bootstrap peer {} at {} (attempt {}/{})",
+                node_id.fmt_short(),
+                socket_addr,
+                attempt,
+                MAX_RETRIES
+            );
+            
+            match endpoint.connect(endpoint_addr, iroh_gossip::ALPN).await {
+                Ok(_conn) => {
+                    tracing::info!(
+                        "✅ Successfully connected to bootstrap peer {} at {} (attempt {})",
+                        node_id.fmt_short(),
+                        socket_addr,
+                        attempt
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    if attempt >= MAX_RETRIES {
+                        tracing::error!(
+                            "❌ Failed to connect to bootstrap peer {} at {} after {} attempts: {}",
+                            node_id.fmt_short(),
+                            socket_addr,
+                            MAX_RETRIES,
+                            e
+                        );
+                        return Err(anyhow::anyhow!(
+                            "Failed to connect to bootstrap peer after {} attempts: {}",
+                            MAX_RETRIES,
+                            e
+                        ));
+                    }
+                    
+                    tracing::warn!(
+                        "⚠️  Connection attempt {}/{} failed for peer {} at {}: {}",
+                        attempt,
+                        MAX_RETRIES,
+                        node_id.fmt_short(),
+                        socket_addr,
+                        e
+                    );
+                    tracing::info!("⏳ Retrying in {}ms...", delay_ms);
+                    
+                    // Wait before retrying with exponential backoff
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    
+                    // Exponential backoff: double the delay, up to MAX_DELAY_MS
+                    delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
+                }
+            }
+        }
     }
 
     /// Main event loop
