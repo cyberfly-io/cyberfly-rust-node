@@ -713,16 +713,16 @@ impl IrohNetwork {
                     .iter()
                     .filter_map(|entry| {
                         let peer_id = *entry.key();
-                        let (timestamp, stored_addr) = entry.value().clone();
+                        let (_timestamp, stored_addr) = entry.value().clone();
                         
-                        // Try to get current address via Iroh's public API
-                        // Note: We can't access msock.remote_info() as it's private,
-                        // so we rely on stored addresses from connections
+                        // Include peer with address if available
+                        // For peers without addresses (connected TO us), include them without address
+                        // Other nodes can discover them via DHT or relay
                         if let Some(addr) = stored_addr {
                             Some(format!("{}@{}", peer_id, addr))
                         } else {
-                            // No address available, skip this peer
-                            None
+                            // Include peer ID without address - let DHT/relay handle discovery
+                            Some(peer_id.to_string())
                         }
                     })
                     .collect();
@@ -1113,8 +1113,8 @@ impl IrohNetwork {
                 GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::info!("Sync neighbor down: {}", peer_node_id);
                 
-                // Remove peer when they disconnect
-                discovered_peers.remove(&peer_node_id);
+                // Don't remove immediately - let the expiration cleanup task handle it
+                // This prevents removing peers that are temporarily disconnected
                 
                 let _ = event_tx.send(NetworkEvent::PeerExpired { peer: peer_node_id });
             }
@@ -1203,8 +1203,9 @@ impl IrohNetwork {
                         // Attempt to connect to unknown peers
                         let mut new_connections = 0;
                         for peer_addr_str in &announcement.connected_peers {
-                            // Parse peer address in format "peerId@ip:port"
+                            // Parse peer address in format "peerId@ip:port" or just "peerId"
                             if let Some(at_idx) = peer_addr_str.find('@') {
+                                // Format: peerId@ip:port
                                 let peer_id_str = &peer_addr_str[..at_idx];
                                 let socket_addr_str = &peer_addr_str[at_idx + 1..];
                                 
@@ -1242,7 +1243,33 @@ impl IrohNetwork {
                                     }
                                 }
                             } else {
-                                tracing::debug!("Invalid peer address format (expected peerId@ip:port): {}", peer_addr_str);
+                                // Format: just peerId (no address) - try DHT/relay discovery
+                                if let Ok(peer_id) = peer_addr_str.parse::<EndpointId>() {
+                                    // Skip if it's our own ID
+                                    if peer_id == node_id {
+                                        continue;
+                                    }
+                                    
+                                    // Skip if already connected
+                                    if discovered_peers.contains_key(&peer_id) {
+                                        continue;
+                                    }
+                                    
+                                    // Attempt to connect via DHT/relay (no explicit address)
+                                    tracing::info!("🔗 Attempting to connect to peer {} via DHT/relay (discovered via {})", 
+                                        peer_id, announcement.node_id);
+                                    
+                                    match endpoint.connect(peer_id, iroh_gossip::ALPN).await {
+                                        Ok(_conn) => {
+                                            discovered_peers.insert(peer_id, (chrono::Utc::now(), None));
+                                            new_connections += 1;
+                                            tracing::info!("✓ Successfully connected to peer {} via DHT/relay", peer_id);
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("Failed to connect to peer {} via DHT: {}", peer_id, e);
+                                        }
+                                    }
+                                }
                             }
                         }
                         
@@ -1262,7 +1289,7 @@ impl IrohNetwork {
             }
             GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::debug!("Peer discovery neighbor down: {}", peer_node_id);
-                discovered_peers.remove(&peer_node_id);
+                // Don't remove immediately - let the expiration cleanup task handle it
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Peer discovery gossip lagged - missed messages");
@@ -1416,8 +1443,9 @@ impl IrohNetwork {
             GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::info!("Neighbor down: {}", peer_node_id);
                 
-                // Remove peer when they disconnect
-                discovered_peers.remove(&peer_node_id);
+                // Don't remove immediately - let the expiration cleanup task handle it
+                // This prevents removing peers that are temporarily disconnected
+                // The cleanup task will remove peers after 30 seconds of inactivity
                 
                 let _ = event_tx.send(NetworkEvent::PeerExpired { peer: peer_node_id });
             }
