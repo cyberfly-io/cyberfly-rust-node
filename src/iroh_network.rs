@@ -1404,13 +1404,22 @@ impl IrohNetwork {
                     tracing::debug!("Received {} message from {} ({} bytes)", topic_type, from, msg.content.len());
                 }
             }
-            GossipEvent::NeighborUp(node_id) => {
-                tracing::info!("Neighbor up: {}", node_id);
-                let _ = event_tx.send(NetworkEvent::PeerDiscovered { peer: node_id });
+            GossipEvent::NeighborUp(peer_node_id) => {
+                tracing::info!("Neighbor up: {}", peer_node_id);
+                
+                // Track this peer immediately when they connect
+                discovered_peers.entry(peer_node_id).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
+                
+                let _ = event_tx.send(NetworkEvent::PeerDiscovered { peer: peer_node_id });
             }
-            GossipEvent::NeighborDown(node_id) => {
-                tracing::info!("Neighbor down: {}", node_id);
-                let _ = event_tx.send(NetworkEvent::PeerExpired { peer: node_id });
+            GossipEvent::NeighborDown(peer_node_id) => {
+                tracing::info!("Neighbor down: {}", peer_node_id);
+                
+                // Remove peer when they disconnect
+                discovered_peers.remove(&peer_node_id);
+                
+                let _ = event_tx.send(NetworkEvent::PeerExpired { peer: peer_node_id });
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Gossip lagged - missed messages");
