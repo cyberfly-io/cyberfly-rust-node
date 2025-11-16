@@ -1975,7 +1975,7 @@ impl MutationRoot {
     ) -> Result<StorageResult, DbError> {
         // Get the discovered peers map to check if peer is already connected
         let discovered_peers = ctx
-            .data::<Arc<dashmap::DashMap<iroh::EndpointId, chrono::DateTime<chrono::Utc>>>>()
+            .data::<Arc<dashmap::DashMap<iroh::EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>>()
             .map_err(|_| DbError::InternalError("Discovered peers map not found".to_string()))?;
 
         // Parse the peer_id string to EndpointId
@@ -2014,8 +2014,8 @@ impl MutationRoot {
         
         tracing::info!("GraphQL: Successfully connected to peer: {}", peer_id);
         
-        // Track the peer in discovered_peers
-        discovered_peers.insert(endpoint_id, chrono::Utc::now());
+        // Track the peer in discovered_peers (address unknown in this context)
+        discovered_peers.insert(endpoint_id, (chrono::Utc::now(), None));
         
         // Keep connection open briefly, then close
         drop(conn);
@@ -2174,7 +2174,7 @@ pub async fn create_server(
     ipfs: IpfsStorage, // Now passed in from main with shared network
     sync_manager: Option<SyncManager>,
     endpoint: Option<iroh::Endpoint>, // Pass Endpoint instead of wrapped IrohNetwork
-    discovered_peers: Option<Arc<dashmap::DashMap<iroh::EndpointId, chrono::DateTime<chrono::Utc>>>>, // Discovered peers map
+    discovered_peers: Option<Arc<dashmap::DashMap<iroh::EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>>, // Discovered peers map with addresses
     iroh_network: Option<Arc<tokio::sync::Mutex<IrohNetwork>>>, // Pass IrohNetwork for dial_peer
     relay_url: Option<String>, // Relay URL for node info
     mqtt_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::GossipToMqttMessage>>,

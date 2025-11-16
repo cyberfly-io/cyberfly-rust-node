@@ -49,7 +49,7 @@ struct GossipMessage {
 struct PeerDiscoveryAnnouncement {
     /// Node ID of the sender
     node_id: String,
-    /// List of connected peer IDs (EndpointIds as hex strings)
+    /// List of connected peer addresses in format "peerId@ip:port"
     connected_peers: Vec<String>,
     /// Unix timestamp when announcement was created
     timestamp: i64,
@@ -168,8 +168,9 @@ pub struct IrohNetwork {
     discovery_sender: Option<Arc<Mutex<GossipSender>>>,
     sync_sender: Option<Arc<Mutex<GossipSender>>>,  // Sync topic sender
     peer_discovery_sender: Option<Arc<Mutex<GossipSender>>>,  // Peer discovery sender
-    // Simple peer tracking - stores peers seen in gossip messages
-    discovered_peers: Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
+    // Peer tracking with addresses - stores peers seen in gossip messages
+    // Maps EndpointId -> (last_seen_timestamp, optional_address)
+    discovered_peers: Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>,
     // Peer announcement cache - prevents reconnection loops
     peer_announcement_cache: Arc<dashmap::DashMap<String, i64>>,  // node_id -> last_timestamp
     // Bootstrap peers for initial gossip network join
@@ -339,8 +340,8 @@ impl IrohNetwork {
         
         tracing::info!("Successfully connected to peer: {}", peer_id);
         
-        // Track the discovered peer
-        self.discovered_peers.insert(peer_id, chrono::Utc::now());
+        // Track the discovered peer (no address since we used EndpointId-only connection)
+        self.discovered_peers.insert(peer_id, (chrono::Utc::now(), None));
         
         // Keep connection alive by storing it (optional)
         drop(conn);
@@ -693,6 +694,7 @@ impl IrohNetwork {
         let peer_list_node_id = node_id;
         let peer_list_discovered_peers = Arc::clone(&self.discovered_peers);
         let peer_list_secret_key = secret_key.clone();
+        let peer_list_endpoint = self.endpoint.clone();
         tokio::spawn(async move {
             // Wait before starting announcements to allow gossip network to stabilize
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -701,10 +703,23 @@ impl IrohNetwork {
             loop {
                 interval.tick().await;
                 
-                // Get current list of connected peers
+                // Get current list of connected peers with addresses
                 let connected_peers: Vec<String> = peer_list_discovered_peers
                     .iter()
-                    .map(|entry| entry.key().to_string())
+                    .filter_map(|entry| {
+                        let peer_id = *entry.key();
+                        let (timestamp, stored_addr) = entry.value().clone();
+                        
+                        // Try to get current address via Iroh's public API
+                        // Note: We can't access msock.remote_info() as it's private,
+                        // so we rely on stored addresses from connections
+                        if let Some(addr) = stored_addr {
+                            Some(format!("{}@{}", peer_id, addr))
+                        } else {
+                            // No address available, skip this peer
+                            None
+                        }
+                    })
                     .collect();
                 
                 // Create signed peer announcement
@@ -746,8 +761,8 @@ impl IrohNetwork {
                 let expired_peers: Vec<EndpointId> = cleanup_discovered_peers
                     .iter()
                     .filter_map(|entry| {
-                        let last_seen = *entry.value();
-                        let duration_since = now.signed_duration_since(last_seen);
+                        let (last_seen, _addr) = entry.value();
+                        let duration_since = now.signed_duration_since(*last_seen);
                         
                         if duration_since.num_seconds() > expiration_timeout.as_secs() as i64 {
                             Some(*entry.key())
@@ -1057,7 +1072,7 @@ impl IrohNetwork {
         event: GossipEvent, 
         node_id: EndpointId,
         event_tx: &mpsc::UnboundedSender<NetworkEvent>,
-        discovered_peers: &Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
+        discovered_peers: &Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>,
     ) -> Result<()> {
                 match event {
                     GossipEvent::Received(msg) => {
@@ -1070,8 +1085,9 @@ impl IrohNetwork {
                     return Ok(());
                 }
                 
-                // Track this peer (update timestamp)
-                discovered_peers.insert(from, chrono::Utc::now());
+                // Track this peer (update timestamp, keep existing address if any)
+                discovered_peers.entry(from).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
 
                 // Emit network event with sync data
                 // The sync manager will handle the actual parsing and processing
@@ -1084,7 +1100,8 @@ impl IrohNetwork {
                 tracing::info!("Sync neighbor up: {}", peer_node_id);
                 
                 // Track this peer immediately when they connect
-                discovered_peers.insert(peer_node_id, chrono::Utc::now());
+                discovered_peers.entry(peer_node_id).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
                 
                 let _ = event_tx.send(NetworkEvent::PeerDiscovered { peer: peer_node_id });
             }
@@ -1109,7 +1126,7 @@ impl IrohNetwork {
     async fn handle_peer_discovery_event(
         event: GossipEvent,
         node_id: EndpointId,
-        discovered_peers: &Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
+        discovered_peers: &Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>,
         peer_announcement_cache: &Arc<dashmap::DashMap<String, i64>>,
         endpoint: &Endpoint,
     ) -> Result<()> {
@@ -1167,8 +1184,9 @@ impl IrohNetwork {
                         // Update cache
                         peer_announcement_cache.insert(announcement.node_id.clone(), announcement.timestamp);
                         
-                        // Track the announcing peer
-                        discovered_peers.insert(from, chrono::Utc::now());
+                        // Track the announcing peer (update timestamp, keep existing address if any)
+                        discovered_peers.entry(from).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                            .or_insert((chrono::Utc::now(), None));
                         
                         tracing::info!(
                             "📋 Received verified peer list from {} (region: {}): {} peers",
@@ -1179,32 +1197,47 @@ impl IrohNetwork {
                         
                         // Attempt to connect to unknown peers
                         let mut new_connections = 0;
-                        for peer_id_str in &announcement.connected_peers {
-                            // Parse peer ID
-                            if let Ok(peer_id) = peer_id_str.parse::<EndpointId>() {
-                                // Skip if it's our own ID
-                                if peer_id == node_id {
-                                    continue;
-                                }
+                        for peer_addr_str in &announcement.connected_peers {
+                            // Parse peer address in format "peerId@ip:port"
+                            if let Some(at_idx) = peer_addr_str.find('@') {
+                                let peer_id_str = &peer_addr_str[..at_idx];
+                                let socket_addr_str = &peer_addr_str[at_idx + 1..];
                                 
-                                // Skip if already connected
-                                if discovered_peers.contains_key(&peer_id) {
-                                    continue;
-                                }
-                                
-                                // Attempt to connect to this peer
-                                tracing::info!("🔗 Attempting to connect to peer {} (discovered via {})", peer_id, announcement.node_id);
-                                
-                                match endpoint.connect(peer_id, iroh_gossip::ALPN).await {
-                                    Ok(_conn) => {
-                                        discovered_peers.insert(peer_id, chrono::Utc::now());
-                                        new_connections += 1;
-                                        tracing::info!("✓ Successfully connected to peer {}", peer_id);
+                                if let (Ok(peer_id), Ok(socket_addr)) = (
+                                    peer_id_str.parse::<EndpointId>(),
+                                    socket_addr_str.parse::<std::net::SocketAddr>()
+                                ) {
+                                    // Skip if it's our own ID
+                                    if peer_id == node_id {
+                                        continue;
                                     }
-                                    Err(e) => {
-                                        tracing::debug!("Failed to connect to peer {}: {}", peer_id, e);
+                                    
+                                    // Skip if already connected
+                                    if discovered_peers.contains_key(&peer_id) {
+                                        continue;
+                                    }
+                                    
+                                    // Attempt to connect to this peer with explicit address
+                                    tracing::info!("🔗 Attempting to connect to peer {} at {} (discovered via {})", 
+                                        peer_id, socket_addr, announcement.node_id);
+                                    
+                                    // Add the peer's address to endpoint
+                                    let peer_addr = EndpointAddr::new(peer_id)
+                                        .with_ip_addr(socket_addr);
+                                    
+                                    match endpoint.connect(peer_addr, iroh_gossip::ALPN).await {
+                                        Ok(_conn) => {
+                                            discovered_peers.insert(peer_id, (chrono::Utc::now(), Some(socket_addr)));
+                                            new_connections += 1;
+                                            tracing::info!("✓ Successfully connected to peer {} at {}", peer_id, socket_addr);
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("Failed to connect to peer {} at {}: {}", peer_id, socket_addr, e);
+                                        }
                                     }
                                 }
+                            } else {
+                                tracing::debug!("Invalid peer address format (expected peerId@ip:port): {}", peer_addr_str);
                             }
                         }
                         
@@ -1219,7 +1252,8 @@ impl IrohNetwork {
             }
             GossipEvent::NeighborUp(peer_node_id) => {
                 tracing::debug!("Peer discovery neighbor up: {}", peer_node_id);
-                discovered_peers.insert(peer_node_id, chrono::Utc::now());
+                discovered_peers.entry(peer_node_id).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
             }
             GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::debug!("Peer discovery neighbor down: {}", peer_node_id);
@@ -1240,7 +1274,7 @@ impl IrohNetwork {
         node_id: EndpointId,
         event_tx: &mpsc::UnboundedSender<NetworkEvent>,
         libp2p_to_mqtt_tx: &Option<mpsc::UnboundedSender<GossipToMqttMessage>>,
-        discovered_peers: &Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>>,
+        discovered_peers: &Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>,
         data_sender: &Arc<Mutex<GossipSender>>,
     ) -> Result<()> {
         match event {
@@ -1253,8 +1287,9 @@ impl IrohNetwork {
                     return Ok(());
                 }
                 
-                // Track this peer (update timestamp)
-                discovered_peers.insert(from, chrono::Utc::now());
+                // Track this peer (update timestamp, keep existing address if any)
+                discovered_peers.entry(from).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
 
                 // Only parse as GossipMessage on the data topic
                 // Discovery and sync topics have different message formats
@@ -1776,7 +1811,10 @@ impl IrohNetwork {
     pub async fn get_connected_peers(&self) -> Vec<(EndpointId, chrono::DateTime<chrono::Utc>)> {
         self.discovered_peers
             .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
+            .map(|entry| {
+                let (timestamp, _addr) = entry.value();
+                (*entry.key(), *timestamp)
+            })
             .collect()
     }
 
@@ -1785,8 +1823,8 @@ impl IrohNetwork {
         self.get_connected_peers().await
     }
     
-    /// Get a cloneable reference to the discovered peers map
-    pub fn discovered_peers_map(&self) -> Arc<dashmap::DashMap<EndpointId, chrono::DateTime<chrono::Utc>>> {
+    /// Get a cloneable reference to the discovered peers map  
+    pub fn discovered_peers_map(&self) -> Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>> {
         self.discovered_peers.clone()
     }
 }
