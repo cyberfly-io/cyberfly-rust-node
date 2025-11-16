@@ -1113,10 +1113,8 @@ impl IrohNetwork {
                 GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::info!("Sync neighbor down: {}", peer_node_id);
                 
-                // Don't remove immediately - let the expiration cleanup task handle it
-                // This prevents removing peers that are temporarily disconnected
-                
-                let _ = event_tx.send(NetworkEvent::PeerExpired { peer: peer_node_id });
+                // Don't send PeerExpired event - let the expiration cleanup task handle it
+                // This prevents confusing "Peer expired" logs on temporary disconnects
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Sync gossip lagged - missed messages");
@@ -1443,11 +1441,8 @@ impl IrohNetwork {
             GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::info!("Neighbor down: {}", peer_node_id);
                 
-                // Don't remove immediately - let the expiration cleanup task handle it
-                // This prevents removing peers that are temporarily disconnected
-                // The cleanup task will remove peers after 30 seconds of inactivity
-                
-                let _ = event_tx.send(NetworkEvent::PeerExpired { peer: peer_node_id });
+                // Don't send PeerExpired event - let the expiration cleanup task handle it
+                // This prevents confusing "Peer expired" logs on temporary disconnects
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Gossip lagged - missed messages");

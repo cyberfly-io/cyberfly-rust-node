@@ -1356,8 +1356,8 @@ impl QueryRoot {
 
         let node_id = endpoint.id().to_string();
 
-        // Get discovered peers count from the DashMap
-        let discovered_peers_count = if let Ok(peers_map) = ctx.data::<std::sync::Arc<dashmap::DashMap<iroh::EndpointId, chrono::DateTime<chrono::Utc>>>>() {
+        // Get discovered peers count from the DashMap with new tuple format (DateTime, Option<SocketAddr>)
+        let discovered_peers_count = if let Ok(peers_map) = ctx.data::<std::sync::Arc<dashmap::DashMap<iroh::EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>>() {
             peers_map.len()
         } else {
             0
@@ -1412,17 +1412,17 @@ impl QueryRoot {
     /// Get list of discovered peers (not necessarily connected)
     async fn get_discovered_peers(&self, ctx: &Context<'_>) -> Result<Vec<PeerInfo>, DbError> {
         let peers_map = ctx
-            .data::<std::sync::Arc<dashmap::DashMap<iroh::EndpointId, chrono::DateTime<chrono::Utc>>>>()
+            .data::<std::sync::Arc<dashmap::DashMap<iroh::EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>>()
             .map_err(|_| DbError::InternalError("Discovered peers map not found".to_string()))?;
 
-        let peers: Vec<(iroh::EndpointId, chrono::DateTime<chrono::Utc>)> = peers_map
+        let peers: Vec<(iroh::EndpointId, chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)> = peers_map
             .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
+            .map(|entry| (*entry.key(), entry.value().0, entry.value().1))
             .collect();
 
         Ok(peers
             .into_iter()
-            .map(|(node_id, last_seen)| PeerInfo {
+            .map(|(node_id, last_seen, _addr)| PeerInfo {
                 peer_id: node_id.to_string(),
                 last_seen: last_seen.to_rfc3339(),
                 connection_status: "connected".to_string(),
