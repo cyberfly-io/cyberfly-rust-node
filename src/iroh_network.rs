@@ -445,6 +445,11 @@ impl IrohNetwork {
                         socket_addr_str.parse::<std::net::SocketAddr>()
                     ) {
                         connected_bootstrap_peers.push((node_id, socket_addr));
+                        
+                        // CRITICAL: Add bootstrap peer to discovered_peers so it gets broadcasted!
+                        // This allows other nodes to discover and connect to the bootstrap peer
+                        self.discovered_peers.insert(node_id, (chrono::Utc::now(), Some(socket_addr)));
+                        tracing::debug!("Added bootstrap peer {} ({}) to discovered peers", node_id.fmt_short(), socket_addr);
                     }
                 }
             }
