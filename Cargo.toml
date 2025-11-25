@@ -39,7 +39,7 @@ dashmap = "6.0"
 
 # MQTT
 rumqttc = "0.24"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 
 # Kadena blockchain interaction
 rust_pact = "0.1.6"

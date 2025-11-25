@@ -131,6 +131,42 @@ lazy_static! {
         "sync_merges_total",
         "Total number of CRDT merges"
     ).unwrap();
+    
+    // Extended peer metrics
+    pub static ref PEER_CONNECTIONS_TOTAL: IntCounter = IntCounter::new(
+        "peer_connections_total",
+        "Total number of peer connection attempts"
+    ).unwrap();
+    
+    pub static ref PEER_CONNECTION_FAILURES: IntCounter = IntCounter::new(
+        "peer_connection_failures_total",
+        "Total number of peer connection failures"
+    ).unwrap();
+    
+    pub static ref PEER_EXPIRATIONS: IntCounter = IntCounter::new(
+        "peer_expirations_total",
+        "Total number of peers expired due to inactivity"
+    ).unwrap();
+    
+    pub static ref PEER_ANNOUNCEMENTS_RECEIVED: IntCounter = IntCounter::new(
+        "peer_announcements_received_total",
+        "Total number of peer discovery announcements received"
+    ).unwrap();
+    
+    pub static ref PEER_ANNOUNCEMENTS_SENT: IntCounter = IntCounter::new(
+        "peer_announcements_sent_total",
+        "Total number of peer discovery announcements sent"
+    ).unwrap();
+    
+    pub static ref GOSSIP_MESSAGES_RECEIVED: IntCounterVec = IntCounterVec::new(
+        Opts::new("gossip_messages_received_total", "Total gossip messages received by topic"),
+        &["topic"]
+    ).unwrap();
+    
+    pub static ref GOSSIP_MESSAGES_SENT: IntCounterVec = IntCounterVec::new(
+        Opts::new("gossip_messages_sent_total", "Total gossip messages sent by topic"),
+        &["topic"]
+    ).unwrap();
 }
 
 /// Initialize metrics registry
@@ -167,6 +203,15 @@ pub fn init_metrics() {
     REGISTRY.register(Box::new(SYNC_OPERATIONS.clone())).unwrap();
     REGISTRY.register(Box::new(SYNC_CONFLICTS.clone())).unwrap();
     REGISTRY.register(Box::new(SYNC_MERGES.clone())).unwrap();
+    
+    // Register peer metrics
+    REGISTRY.register(Box::new(PEER_CONNECTIONS_TOTAL.clone())).unwrap();
+    REGISTRY.register(Box::new(PEER_CONNECTION_FAILURES.clone())).unwrap();
+    REGISTRY.register(Box::new(PEER_EXPIRATIONS.clone())).unwrap();
+    REGISTRY.register(Box::new(PEER_ANNOUNCEMENTS_RECEIVED.clone())).unwrap();
+    REGISTRY.register(Box::new(PEER_ANNOUNCEMENTS_SENT.clone())).unwrap();
+    REGISTRY.register(Box::new(GOSSIP_MESSAGES_RECEIVED.clone())).unwrap();
+    REGISTRY.register(Box::new(GOSSIP_MESSAGES_SENT.clone())).unwrap();
     
     tracing::info!("Metrics registry initialized with {} collectors", REGISTRY.gather().len());
 }

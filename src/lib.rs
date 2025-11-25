@@ -13,6 +13,7 @@ pub mod kadena;
 pub mod metrics;
 pub mod mqtt_bridge;
 pub mod node_region;
+pub mod peer_registry;
 pub mod resource_manager;
 pub mod retry;
 pub mod state_manager;
@@ -27,3 +28,4 @@ pub use crate::graphql::{QueryRoot, MutationRoot, SubscriptionRoot, ApiSchema, S
 pub use crate::indexing::{IndexManager, SecondaryIndex, IndexType, QueryOperator, QueryResult as IndexQueryResult};
 pub use crate::storage::{RedisStorage, StoreType, SignatureMetadata, StoredEntry, SortedSetEntry, BatchWriter, BatchWriterStats};
 pub use crate::sync::{SyncStore, SyncManager, SignedOperation, SyncMessage};
+pub use crate::peer_registry::{PeerRegistry, PeerRegistryConfig, PeerMeta, PeerStatus, PeerCapabilities, PeerSummary};

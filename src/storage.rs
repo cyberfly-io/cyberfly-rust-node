@@ -183,9 +183,9 @@ impl TieredCache {
 
     async fn insert(&self, key: String, value: StoredValue) {
         let arc_value = Arc::new(value);
-        // Insert into both tiers (hot takes priority)
-        self.hot.insert(key.clone(), Arc::clone(&arc_value)).await;
-        self.warm.insert(key, arc_value).await;
+        // Insert only to hot tier; warm tier is for demoted entries
+        // This reduces memory usage and write amplification
+        self.hot.insert(key, arc_value).await;
         
         // Update cache size metrics
         self.update_size_metrics();
@@ -1649,9 +1649,10 @@ impl BlobStorage {
         db_prefix: &str,
     ) -> Result<Vec<(String, serde_json::Value, Option<SignatureMetadata>)>> {
         let prefix = format!("{}:", db_prefix);
-        let mut res: Vec<(String, serde_json::Value, Option<SignatureMetadata>)> = Vec::new();
+        let keys = self.index_keys_with_prefix(&prefix)?;
+        let mut res: Vec<(String, serde_json::Value, Option<SignatureMetadata>)> = Vec::with_capacity(keys.len());
 
-        for key in self.index_keys_with_prefix(&prefix)? {
+        for key in keys {
             if let Some((_, stype)) = self.index_get(&key)? {
                 if matches!(stype, StoreType::Json) {
                     if let Ok(Some(stored)) = self.get_value(&key).await {
@@ -1672,8 +1673,9 @@ impl BlobStorage {
         db_prefix: &str,
     ) -> Result<Vec<(String, String, Option<SignatureMetadata>)>> {
         let prefix = format!("{}:", db_prefix);
-        let mut out = Vec::new();
-        for key in self.index_keys_with_prefix(&prefix)? {
+        let keys = self.index_keys_with_prefix(&prefix)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
             if let Some((_, stype)) = self.index_get(&key)? {
                 if matches!(stype, StoreType::String) {
                     if let Ok(Some(StoredValue::String(sv))) = self.get_value(&key).await {
@@ -1691,8 +1693,9 @@ impl BlobStorage {
         db_prefix: &str,
     ) -> Result<Vec<(String, Vec<(String, String)>, Option<SignatureMetadata>)>> {
         let prefix = format!("{}:", db_prefix);
-        let mut out = Vec::new();
-        for key in self.index_keys_with_prefix(&prefix)? {
+        let keys = self.index_keys_with_prefix(&prefix)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
             if let Some((_, stype)) = self.index_get(&key)? {
                 if matches!(stype, StoreType::Hash) {
                     if let Ok(Some(StoredValue::Hash(hv))) = self.get_value(&key).await {
@@ -1710,8 +1713,9 @@ impl BlobStorage {
         db_prefix: &str,
     ) -> Result<Vec<(String, Vec<String>, Option<SignatureMetadata>)>> {
         let prefix = format!("{}:", db_prefix);
-        let mut out = Vec::new();
-        for key in self.index_keys_with_prefix(&prefix)? {
+        let keys = self.index_keys_with_prefix(&prefix)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
             if let Some((_, stype)) = self.index_get(&key)? {
                 if matches!(stype, StoreType::List) {
                     if let Ok(Some(StoredValue::List(lv))) = self.get_value(&key).await {
@@ -1729,8 +1733,9 @@ impl BlobStorage {
         db_prefix: &str,
     ) -> Result<Vec<(String, Vec<String>, Option<SignatureMetadata>)>> {
         let prefix = format!("{}:", db_prefix);
-        let mut out = Vec::new();
-        for key in self.index_keys_with_prefix(&prefix)? {
+        let keys = self.index_keys_with_prefix(&prefix)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
             if let Some((_, stype)) = self.index_get(&key)? {
                 if matches!(stype, StoreType::Set) {
                     if let Ok(Some(StoredValue::Set(sv))) = self.get_value(&key).await {
@@ -1748,8 +1753,9 @@ impl BlobStorage {
         db_prefix: &str,
     ) -> Result<Vec<(String, Vec<(String, f64)>, Option<SignatureMetadata>)>> {
         let prefix = format!("{}:", db_prefix);
-        let mut out = Vec::new();
-        for key in self.index_keys_with_prefix(&prefix)? {
+        let keys = self.index_keys_with_prefix(&prefix)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
             if let Some((_, stype)) = self.index_get(&key)? {
                 if matches!(stype, StoreType::SortedSet) {
                     if let Ok(Some(StoredValue::SortedSet(ssv))) = self.get_value(&key).await {
@@ -1776,8 +1782,9 @@ impl BlobStorage {
         db_prefix: &str,
     ) -> Result<Vec<(String, Vec<(String, Vec<(String, String)>)>, Option<SignatureMetadata>)>> {
         let prefix = format!("{}:", db_prefix);
-        let mut out = Vec::new();
-        for key in self.index_keys_with_prefix(&prefix)? {
+        let keys = self.index_keys_with_prefix(&prefix)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
             if let Some((_, stype)) = self.index_get(&key)? {
                 if matches!(stype, StoreType::Stream) {
                     if let Ok(Some(StoredValue::Stream(sv))) = self.get_value(&key).await {
@@ -1795,8 +1802,9 @@ impl BlobStorage {
         db_prefix: &str,
     ) -> Result<Vec<(String, Vec<(i64, f64)>, Option<SignatureMetadata>)>> {
         let prefix = format!("{}:", db_prefix);
-        let mut out = Vec::new();
-        for key in self.index_keys_with_prefix(&prefix)? {
+        let keys = self.index_keys_with_prefix(&prefix)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
             if let Some((_, stype)) = self.index_get(&key)? {
                 if matches!(stype, StoreType::TimeSeries) {
                     if let Ok(Some(StoredValue::TimeSeries(tsv))) = self.get_value(&key).await {
@@ -1815,8 +1823,9 @@ impl BlobStorage {
         db_prefix: &str,
     ) -> Result<Vec<(String, Vec<(String, f64, f64)>, Option<SignatureMetadata>)>> {
         let prefix = format!("{}:", db_prefix);
-        let mut out = Vec::new();
-        for key in self.index_keys_with_prefix(&prefix)? {
+        let keys = self.index_keys_with_prefix(&prefix)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
             if let Some((_, stype)) = self.index_get(&key)? {
                 if matches!(stype, StoreType::Geo) {
                     if let Ok(Some(StoredValue::Geo(gv))) = self.get_value(&key).await {

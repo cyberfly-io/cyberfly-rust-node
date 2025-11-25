@@ -20,6 +20,7 @@ use crate::{
     error::{DbError, STORAGE_NOT_FOUND, SYNC_MANAGER_NOT_FOUND, IPFS_STORAGE_NOT_FOUND, ENDPOINT_NOT_FOUND, MQTT_STORE_NOT_FOUND, MQTT_BRIDGE_NOT_AVAILABLE, INVALID_TIMESTAMP, INVALID_TIMESTAMP_FORMAT, MESSAGE_BROADCAST_NOT_FOUND, SYNC_OUTBOUND_NOT_FOUND, DISCOVERED_PEERS_NOT_FOUND}, 
     ipfs::IpfsStorage, 
     iroh_network::IrohNetwork,
+    peer_registry::PeerRegistry,
     storage::RedisStorage, 
     sync::SyncManager
 };
@@ -30,6 +31,17 @@ static START_TIME: OnceLock<std::time::Instant> = OnceLock::new();
 
 fn get_start_time() -> std::time::Instant {
     *START_TIME.get_or_init(|| std::time::Instant::now())
+}
+
+/// Optimized key formatting to reduce allocations
+/// Pre-allocates string with exact capacity needed
+#[inline]
+fn format_key(db_name: &str, key: &str) -> String {
+    let mut full_key = String::with_capacity(db_name.len() + key.len() + 1);
+    full_key.push_str(db_name);
+    full_key.push(':');
+    full_key.push_str(key);
+    full_key
 }
 
 // Combined state for API routes
@@ -249,6 +261,40 @@ pub struct PeerInfo {
     pub last_seen: String,
 }
 
+/// Detailed peer information from the PeerRegistry
+#[derive(SimpleObject, Clone)]
+pub struct PeerDetail {
+    pub peer_id: String,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub address: Option<String>,
+    pub region: Option<String>,
+    pub status: String,
+    pub failure_count: i32,
+    pub is_bootstrap: bool,
+    pub supports_mqtt: bool,
+    pub supports_streams: bool,
+}
+
+/// Summary of the peer mesh network
+#[derive(SimpleObject, Clone)]
+pub struct PeerMeshSummary {
+    pub total_peers: i32,
+    pub connected_peers: i32,
+    pub idle_peers: i32,
+    pub stale_peers: i32,
+    pub bootstrap_peers: i32,
+    pub peers_with_address: i32,
+    pub regions: Vec<RegionPeerCount>,
+}
+
+/// Peer count by region
+#[derive(SimpleObject, Clone)]
+pub struct RegionPeerCount {
+    pub region: String,
+    pub count: i32,
+}
+
 #[derive(SimpleObject, Clone)]
 pub struct SyncResult {
     pub success: bool,
@@ -324,7 +370,7 @@ impl QueryRoot {
                 DbError::StaticError(STORAGE_NOT_FOUND)
             })?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let value = storage.get_string(&full_key).await.map_err(DbError::from)?;
 
         Ok(QueryResult {
@@ -531,7 +577,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let value = storage
             .get_hash(&full_key, &field)
             .await
@@ -554,7 +600,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let fields = storage
             .get_all_hash(&full_key)
             .await
@@ -582,7 +628,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let start = start.unwrap_or(0) as isize;
         let stop = stop.unwrap_or(-1) as isize;
 
@@ -603,7 +649,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         storage.get_set(&full_key).await.map_err(DbError::from)
     }
 
@@ -620,7 +666,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let start = start.unwrap_or(0) as isize;
         let stop = stop.unwrap_or(-1) as isize;
 
@@ -677,7 +723,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let value = storage
             .get_json(&full_key, path.as_deref())
             .await
@@ -701,7 +747,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let value = storage
             .filter_json(&full_key, &json_path)
             .await
@@ -788,7 +834,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let start = start.as_deref().unwrap_or("-");
         let end = end.as_deref().unwrap_or("+");
         let count_val = count.map(|c| c as usize);
@@ -824,7 +870,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let start = start.as_deref().unwrap_or("-");
         let end = end.as_deref().unwrap_or("+");
 
@@ -856,7 +902,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let length = storage.xlen(&full_key).await.map_err(DbError::from)?;
 
         Ok(length as i32)
@@ -877,7 +923,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let from_ts = from_timestamp
             .parse::<i64>()
             .map_err(|_| DbError::StaticError("Invalid from_timestamp"))?;
@@ -914,7 +960,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let from_ts = from_timestamp
             .parse::<i64>()
             .map_err(|_| DbError::StaticError("Invalid from_timestamp"))?;
@@ -947,7 +993,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let data = storage.ts_get(&full_key).await.map_err(DbError::from)?;
 
         Ok(data.map(|(ts, val)| TimeSeriesPoint {
@@ -970,7 +1016,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let pos = storage
             .geopos(&full_key, &member)
             .await
@@ -998,7 +1044,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let unit_str = unit.as_deref().unwrap_or("m");
 
         let results = storage
@@ -1029,7 +1075,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let unit_str = unit.as_deref().unwrap_or("m");
 
         let results = storage
@@ -1060,7 +1106,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
 
         storage
             .geodist(&full_key, &member1, &member2, unit.as_deref())
@@ -1082,7 +1128,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let fields = storage
             .filter_hash(&full_key, &field_pattern)
             .await
@@ -1109,7 +1155,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         storage
             .filter_list(&full_key, &value_pattern)
             .await
@@ -1128,7 +1174,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         storage
             .filter_set(&full_key, &member_pattern)
             .await
@@ -1148,7 +1194,7 @@ impl QueryRoot {
             .data::<RedisStorage>()
             .map_err(|_| DbError::StaticError(STORAGE_NOT_FOUND))?;
 
-        let full_key = format!("{}:{}", db_name, key);
+        let full_key = format_key(&db_name, &key);
         let results = storage
             .filter_sorted_set_with_scores(&full_key, min_score, max_score)
             .await
@@ -1426,6 +1472,87 @@ impl QueryRoot {
                 peer_id: node_id.to_string(),
                 last_seen: last_seen.to_rfc3339(),
                 connection_status: "connected".to_string(),
+            })
+            .collect())
+    }
+
+    /// Get detailed peer mesh summary from PeerRegistry
+    async fn get_peer_mesh_summary(&self, ctx: &Context<'_>) -> Result<PeerMeshSummary, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_peer_mesh_summary"]).inc();
+        
+        let registry = ctx
+            .data::<std::sync::Arc<PeerRegistry>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_peer_mesh_summary"]).inc();
+                DbError::InternalError("PeerRegistry not found".to_string())
+            })?;
+
+        let summary = registry.summary();
+        
+        let regions: Vec<RegionPeerCount> = summary
+            .peers_by_region
+            .into_iter()
+            .map(|(region, count)| RegionPeerCount {
+                region,
+                count: count as i32,
+            })
+            .collect();
+
+        Ok(PeerMeshSummary {
+            total_peers: summary.total_peers as i32,
+            connected_peers: summary.connected_peers as i32,
+            idle_peers: summary.idle_peers as i32,
+            stale_peers: summary.stale_peers as i32,
+            bootstrap_peers: summary.bootstrap_peers as i32,
+            peers_with_address: summary.peers_with_address as i32,
+            regions,
+        })
+    }
+
+    /// Get detailed list of all peers from PeerRegistry
+    async fn get_peer_details(&self, ctx: &Context<'_>) -> Result<Vec<PeerDetail>, DbError> {
+        use crate::metrics;
+        use crate::peer_registry::PeerStatus;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_peer_details"]).inc();
+        
+        let registry = ctx
+            .data::<std::sync::Arc<PeerRegistry>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_peer_details"]).inc();
+                DbError::InternalError("PeerRegistry not found".to_string())
+            })?;
+
+        let peers = registry.get_all_peer_info();
+        
+        Ok(peers
+            .into_iter()
+            .map(|(peer_id, meta)| {
+                let status = meta.status(
+                    std::time::Duration::from_secs(15),
+                    std::time::Duration::from_secs(30),
+                );
+                let status_str = match status {
+                    PeerStatus::Connected => "connected",
+                    PeerStatus::Idle => "idle",
+                    PeerStatus::Stale => "stale",
+                    PeerStatus::Expired => "expired",
+                };
+                
+                PeerDetail {
+                    peer_id: peer_id.to_string(),
+                    first_seen: meta.first_seen.to_rfc3339(),
+                    last_seen: meta.last_seen.to_rfc3339(),
+                    address: meta.addr.map(|a| a.to_string()),
+                    region: meta.region,
+                    status: status_str.to_string(),
+                    failure_count: meta.failure_count as i32,
+                    is_bootstrap: meta.is_bootstrap,
+                    supports_mqtt: meta.capabilities.supports_mqtt,
+                    supports_streams: meta.capabilities.supports_streams,
+                }
             })
             .collect())
     }
@@ -2176,6 +2303,7 @@ pub async fn create_server(
     endpoint: Option<iroh::Endpoint>, // Pass Endpoint instead of wrapped IrohNetwork
     discovered_peers: Option<Arc<dashmap::DashMap<iroh::EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>>, // Discovered peers map with addresses
     iroh_network: Option<Arc<tokio::sync::Mutex<IrohNetwork>>>, // Pass IrohNetwork for dial_peer
+    peer_registry: Option<Arc<PeerRegistry>>, // New: Centralized peer registry
     relay_url: Option<String>, // Relay URL for node info
     mqtt_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::GossipToMqttMessage>>,
     mqtt_to_gossip_tx: Option<
@@ -2219,6 +2347,11 @@ pub async fn create_server(
     // Add IrohNetwork if available (for dial_peer)
     if let Some(network) = iroh_network {
         schema_builder = schema_builder.data(network);
+    }
+
+    // Add PeerRegistry if available (for peer mesh summary)
+    if let Some(registry) = peer_registry {
+        schema_builder = schema_builder.data(registry);
     }
 
     // Add relay URL if available

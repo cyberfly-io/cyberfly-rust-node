@@ -10,6 +10,7 @@ mod kadena; // Kadena blockchain integration
 mod metrics; // Performance metrics
 mod mqtt_bridge;
 mod node_region; // Node region detection
+mod peer_registry; // Centralized peer lifecycle management
 mod retry; // Enhanced retry and circuit breaker mechanisms
 mod storage;
 mod sync; // Data synchronization with CRDT
@@ -517,6 +518,13 @@ async fn main() -> Result<()> {
     // Get cloneable reference to discovered peers map before moving network
     let discovered_peers_map = network.discovered_peers_map();
     
+    // Create PeerRegistry for centralized peer management
+    let peer_registry = std::sync::Arc::new(peer_registry::PeerRegistry::new(
+        peer_id,
+        peer_registry::PeerRegistryConfig::default(),
+    ));
+    tracing::info!("PeerRegistry initialized for centralized peer management");
+    
     // Wrap network in Arc so we can share it with GraphQL while still moving it to tokio::spawn
     let network = Arc::new(tokio::sync::Mutex::new(network));
     let network_for_graphql = network.clone();
@@ -531,6 +539,7 @@ async fn main() -> Result<()> {
         Some(endpoint_for_graphql), // Pass endpoint instead of wrapped network
         Some(discovered_peers_map), // Pass discovered peers map
         Some(network_for_graphql),   // Pass Arc<Mutex<IrohNetwork>> for dial_peer
+        Some(peer_registry.clone()), // Pass PeerRegistry for mesh summary
         relay_url_with_public_ip, // Pass relay URL with public IP
         mqtt_tx,
         mqtt_to_gossip_tx,
