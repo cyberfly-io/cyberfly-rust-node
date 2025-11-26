@@ -17,8 +17,32 @@ This index provides quick navigation to all documentation for the advanced stora
 - **[ADVANCED_FILTERS.md](ADVANCED_FILTERS.md)** - Comprehensive filtering system documentation
 - **[STORAGE_IMPROVEMENTS.md](STORAGE_IMPROVEMENTS.md)** - Storage layer enhancements
 - **[GET_ALL_STREAM.md](GET_ALL_STREAM.md)** - getAllStream feature documentation
+- **[NETWORK_RESILIENCE.md](NETWORK_RESILIENCE.md)** - Circuit breaker, reputation, bandwidth throttling
+- **[INDEXING.md](INDEXING.md)** - Secondary indexing system
+- **[SIGNATURE_AND_FILTERS.md](SIGNATURE_AND_FILTERS.md)** - Signature verification and filters
 
 ## Features by Category
+
+### Network Resilience
+
+**Documentation:** [NETWORK_RESILIENCE.md](NETWORK_RESILIENCE.md)
+
+**Features:**
+- Circuit Breaker - Prevents hammering failing peers
+- Peer Reputation - Tracks peer reliability over time
+- Bandwidth Throttling - Rate limits network traffic
+- Automatic peer banning and recovery
+
+**Quick Example:**
+```graphql
+query {
+  getNetworkResilienceSummary {
+    circuitBreaker { totalPeers closed open halfOpen }
+    reputation { totalPeers bannedPeers avgScore avgReliability }
+    bandwidth { totalUploaded totalDownloaded }
+  }
+}
+```
 
 ### JSON Filtering
 

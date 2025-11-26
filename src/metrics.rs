@@ -167,6 +167,43 @@ lazy_static! {
         Opts::new("gossip_messages_sent_total", "Total gossip messages sent by topic"),
         &["topic"]
     ).unwrap();
+
+    // ============================================================================
+    // Network Resilience Metrics
+    // ============================================================================
+    
+    // Circuit Breaker metrics
+    pub static ref CIRCUIT_BREAKER_STATE: prometheus::IntGaugeVec = prometheus::IntGaugeVec::new(
+        Opts::new("circuit_breaker_state", "Circuit breaker state by peer and state type (1=active, 0=inactive)"),
+        &["peer", "state"]
+    ).unwrap();
+    
+    pub static ref CIRCUIT_BREAKER_TRIPS: IntCounter = IntCounter::new(
+        "circuit_breaker_trips_total",
+        "Total number of times circuit breakers have tripped (opened)"
+    ).unwrap();
+    
+    // Peer Reputation metrics
+    pub static ref PEER_REPUTATION_SCORE: prometheus::GaugeVec = prometheus::GaugeVec::new(
+        Opts::new("peer_reputation_score", "Current reputation score by peer"),
+        &["peer"]
+    ).unwrap();
+    
+    pub static ref PEERS_BANNED: IntGauge = IntGauge::new(
+        "peers_banned_current",
+        "Current number of banned peers"
+    ).unwrap();
+    
+    // Bandwidth Throttle metrics
+    pub static ref BANDWIDTH_BYTES: CounterVec = CounterVec::new(
+        Opts::new("bandwidth_bytes_total", "Total bytes transferred by direction"),
+        &["direction"]
+    ).unwrap();
+    
+    pub static ref BANDWIDTH_THROTTLED: IntCounterVec = IntCounterVec::new(
+        Opts::new("bandwidth_throttled_total", "Number of throttled requests by type and scope"),
+        &["direction", "scope"]
+    ).unwrap();
 }
 
 /// Initialize metrics registry
@@ -212,6 +249,14 @@ pub fn init_metrics() {
     REGISTRY.register(Box::new(PEER_ANNOUNCEMENTS_SENT.clone())).unwrap();
     REGISTRY.register(Box::new(GOSSIP_MESSAGES_RECEIVED.clone())).unwrap();
     REGISTRY.register(Box::new(GOSSIP_MESSAGES_SENT.clone())).unwrap();
+    
+    // Register network resilience metrics
+    REGISTRY.register(Box::new(CIRCUIT_BREAKER_STATE.clone())).unwrap();
+    REGISTRY.register(Box::new(CIRCUIT_BREAKER_TRIPS.clone())).unwrap();
+    REGISTRY.register(Box::new(PEER_REPUTATION_SCORE.clone())).unwrap();
+    REGISTRY.register(Box::new(PEERS_BANNED.clone())).unwrap();
+    REGISTRY.register(Box::new(BANDWIDTH_BYTES.clone())).unwrap();
+    REGISTRY.register(Box::new(BANDWIDTH_THROTTLED.clone())).unwrap();
     
     tracing::info!("Metrics registry initialized with {} collectors", REGISTRY.gather().len());
 }

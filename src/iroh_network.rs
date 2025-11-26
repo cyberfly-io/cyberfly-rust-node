@@ -17,6 +17,10 @@ use tokio_stream::StreamExt;
 use rumqttc::QoS;
 
 use crate::mqtt_bridge::{GossipToMqttMessage, MqttToGossipMessage, MessageOrigin};
+use crate::gossip_discovery::{
+    GossipDiscoveryBuilder, DiscoverySender, DiscoveryReceiver, DiscoveryNode, 
+    NodeCapabilities, PeerInfo,
+};
 
 /// Network event types
 #[derive(Debug, Clone)]
@@ -163,11 +167,14 @@ pub struct IrohNetwork {
     discovery_topic: TopicId,
     sync_topic: TopicId,  // New topic for data sync
     peer_discovery_topic: TopicId,  // New topic for peer list announcements
+    improved_discovery_topic: TopicId,  // Improved gossip discovery topic (postcard + ed25519)
     // Senders for broadcasting (set after subscribing)
     data_sender: Option<Arc<Mutex<GossipSender>>>,
     discovery_sender: Option<Arc<Mutex<GossipSender>>>,
     sync_sender: Option<Arc<Mutex<GossipSender>>>,  // Sync topic sender
     peer_discovery_sender: Option<Arc<Mutex<GossipSender>>>,  // Peer discovery sender
+    // Improved gossip discovery (postcard serialization + ed25519 signatures)
+    improved_discovery_peers: Arc<dashmap::DashMap<EndpointId, PeerInfo>>,
     // Peer tracking with addresses - stores peers seen in gossip messages
     // Maps EndpointId -> (last_seen_timestamp, optional_address)
     discovered_peers: Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>,
@@ -278,6 +285,7 @@ impl IrohNetwork {
         let discovery_topic = TopicId::from_bytes(*b"decentralized-db-discovery-iroh!");
         let sync_topic = TopicId::from_bytes(*b"decentralized-db-sync-v1-iroh!!!");
         let peer_discovery_topic = TopicId::from_bytes(*b"decentralized-peer-list-v1-iroh!");
+        let improved_discovery_topic = TopicId::from_bytes(*b"cyberfly-discovery-v2-postcard!!");
         
         // Parse bootstrap peers (includes hardcoded peer, filtered by local node_id)
         let bootstrap_peers = Self::parse_bootstrap_peers(&bootstrap_peer_strings, node_id);
@@ -299,10 +307,12 @@ impl IrohNetwork {
             discovery_topic,
             sync_topic,
             peer_discovery_topic,
+            improved_discovery_topic,
             data_sender: None,
             discovery_sender: None,
             sync_sender: None,
             peer_discovery_sender: None,
+            improved_discovery_peers: Arc::new(dashmap::DashMap::new()),
             discovered_peers: Arc::new(dashmap::DashMap::new()),
             peer_announcement_cache: Arc::new(dashmap::DashMap::new()),
             bootstrap_peers,
@@ -673,6 +683,25 @@ impl IrohNetwork {
         self.peer_discovery_sender = Some(Arc::new(Mutex::new(peer_discovery_sender)));
         tracing::info!("Subscribed to peer discovery topic");
 
+        // Initialize improved gossip discovery (postcard + ed25519 signatures)
+        // This runs alongside the legacy JSON-based discovery for backward compatibility
+        let (mut improved_sender, mut improved_receiver) = GossipDiscoveryBuilder::new()
+            .with_expiration_timeout(std::time::Duration::from_secs(30))
+            .with_broadcast_interval(std::time::Duration::from_secs(5))
+            .build(
+                self.gossip.clone(),
+                self.improved_discovery_topic,
+                bootstrap_peers.clone(),
+                &self.endpoint,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize improved discovery: {}", e))?;
+        tracing::info!("✓ Initialized improved gossip discovery (postcard + ed25519)");
+
+        // Store reference to improved discovery peer map
+        let improved_peers_ref = Arc::clone(&improved_receiver.neighbor_map);
+        self.improved_discovery_peers = improved_peers_ref;
+
         // Wait for peers to join before starting broadcasts (following iroh-gossip best practices)
         if !bootstrap_peers.is_empty() {
             tracing::info!("Waiting for peers to join gossip network...");
@@ -692,6 +721,37 @@ impl IrohNetwork {
         // Get node_id first before using in beacon task
         let node_id = self.node_id;
         let secret_key = self.endpoint.secret_key().clone();
+
+        // Start improved discovery sender task
+        let discovery_node = DiscoveryNode {
+            name: format!("cyberfly-{}", &node_id.to_string()[..8]),
+            node_id,
+            count: 0,
+            region: crate::node_region::get_node_region(),
+            capabilities: NodeCapabilities {
+                mqtt: self.mqtt_to_libp2p_rx.is_some(),
+                streams: true,
+                timeseries: true,
+                geo: true,
+                blobs: true,
+            },
+        };
+        tokio::spawn(async move {
+            if let Err(e) = improved_sender.run(discovery_node).await {
+                tracing::error!("Improved discovery sender error: {}", e);
+            }
+        });
+        tracing::info!("🚀 Started improved discovery sender (postcard serialization, 5s interval)");
+
+        // Start improved discovery receiver task
+        let improved_event_tx = self.event_tx.clone();
+        let improved_discovered_peers = Arc::clone(&self.discovered_peers);
+        tokio::spawn(async move {
+            if let Err(e) = improved_receiver.run().await {
+                tracing::error!("Improved discovery receiver error: {}", e);
+            }
+        });
+        tracing::info!("🚀 Started improved discovery receiver (ed25519 signature verification)");
 
         // Start peer list announcement task - broadcasts connected peers every 10 seconds
         // This enables full mesh topology by sharing peer lists across the network
@@ -1863,6 +1923,28 @@ impl IrohNetwork {
     /// Get a cloneable reference to the discovered peers map  
     pub fn discovered_peers_map(&self) -> Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>> {
         self.discovered_peers.clone()
+    }
+
+    /// Get peers from improved discovery system with detailed info
+    pub fn get_improved_discovery_peers(&self) -> Vec<(EndpointId, PeerInfo)> {
+        self.improved_discovery_peers
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect()
+    }
+
+    /// Get count of peers from improved discovery
+    pub fn improved_discovery_peer_count(&self) -> usize {
+        self.improved_discovery_peers.len()
+    }
+
+    /// Get peers by region from improved discovery
+    pub fn get_peers_by_region(&self, region: &str) -> Vec<EndpointId> {
+        self.improved_discovery_peers
+            .iter()
+            .filter(|entry| entry.value().region == region)
+            .map(|entry| *entry.key())
+            .collect()
     }
 }
 

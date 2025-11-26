@@ -3,12 +3,14 @@ mod crdt;
 mod crypto;
 mod error;
 mod filters;
+mod gossip_discovery; // Improved gossip-based peer discovery
 mod graphql;
 mod ipfs;
 mod iroh_network; // Iroh-based networking
 mod kadena; // Kadena blockchain integration
 mod metrics; // Performance metrics
 mod mqtt_bridge;
+mod network_resilience; // Circuit breaker, reputation, bandwidth throttling
 mod node_region; // Node region detection
 mod peer_registry; // Centralized peer lifecycle management
 mod retry; // Enhanced retry and circuit breaker mechanisms
@@ -525,6 +527,16 @@ async fn main() -> Result<()> {
     ));
     tracing::info!("PeerRegistry initialized for centralized peer management");
     
+    // Create NetworkResilience for circuit breaker, reputation, and bandwidth throttling
+    let network_resilience = std::sync::Arc::new(network_resilience::NetworkResilience::new(
+        network_resilience::CircuitBreakerConfig::default(),
+        network_resilience::ReputationConfig::default(),
+        network_resilience::BandwidthConfig::default(),
+    ));
+    // Start background tasks (reputation decay)
+    network_resilience::NetworkResilience::start_background_tasks(network_resilience.clone());
+    tracing::info!("NetworkResilience initialized (circuit breaker, reputation, bandwidth throttling)");
+    
     // Wrap network in Arc so we can share it with GraphQL while still moving it to tokio::spawn
     let network = Arc::new(tokio::sync::Mutex::new(network));
     let network_for_graphql = network.clone();
@@ -540,6 +552,7 @@ async fn main() -> Result<()> {
         Some(discovered_peers_map), // Pass discovered peers map
         Some(network_for_graphql),   // Pass Arc<Mutex<IrohNetwork>> for dial_peer
         Some(peer_registry.clone()), // Pass PeerRegistry for mesh summary
+        Some(network_resilience.clone()), // Pass NetworkResilience for circuit breaker, reputation, bandwidth
         relay_url_with_public_ip, // Pass relay URL with public IP
         mqtt_tx,
         mqtt_to_gossip_tx,

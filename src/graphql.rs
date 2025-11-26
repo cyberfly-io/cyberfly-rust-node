@@ -295,6 +295,73 @@ pub struct RegionPeerCount {
     pub count: i32,
 }
 
+// ============================================================================
+// Network Resilience GraphQL Types
+// ============================================================================
+
+/// Circuit breaker status for a peer
+#[derive(SimpleObject, Clone)]
+pub struct CircuitBreakerStatus {
+    pub peer_id: String,
+    pub state: String,  // "closed", "open", "half_open"
+}
+
+/// Circuit breaker summary
+#[derive(SimpleObject, Clone)]
+pub struct CircuitBreakerSummaryGql {
+    pub total_peers: i32,
+    pub closed: i32,
+    pub open: i32,
+    pub half_open: i32,
+}
+
+/// Peer reputation details
+#[derive(SimpleObject, Clone)]
+pub struct PeerReputationGql {
+    pub peer_id: String,
+    pub score: f64,
+    pub successful_syncs: i64,
+    pub failed_syncs: i64,
+    pub successful_messages: i64,
+    pub failed_messages: i64,
+    pub avg_latency_ms: f64,
+    pub bytes_received: i64,
+    pub bytes_sent: i64,
+    pub reliability: f64,
+    pub is_banned: bool,
+    pub ban_reason: Option<String>,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
+/// Reputation summary statistics
+#[derive(SimpleObject, Clone)]
+pub struct ReputationSummaryGql {
+    pub total_peers: i32,
+    pub banned_peers: i32,
+    pub avg_score: f64,
+    pub avg_reliability: f64,
+}
+
+/// Bandwidth usage statistics
+#[derive(SimpleObject, Clone)]
+pub struct BandwidthStatsGql {
+    pub total_uploaded: i64,
+    pub total_downloaded: i64,
+    pub upload_available: Option<i64>,
+    pub download_available: Option<i64>,
+    pub upload_limit_bps: i64,
+    pub download_limit_bps: i64,
+}
+
+/// Combined network resilience summary
+#[derive(SimpleObject, Clone)]
+pub struct NetworkResilienceSummaryGql {
+    pub circuit_breaker: CircuitBreakerSummaryGql,
+    pub reputation: ReputationSummaryGql,
+    pub bandwidth: BandwidthStatsGql,
+}
+
 #[derive(SimpleObject, Clone)]
 pub struct SyncResult {
     pub success: bool,
@@ -1557,6 +1624,223 @@ impl QueryRoot {
             .collect())
     }
 
+    // ============================================================================
+    // Network Resilience Queries
+    // ============================================================================
+
+    /// Get circuit breaker summary
+    async fn get_circuit_breaker_summary(&self, ctx: &Context<'_>) -> Result<CircuitBreakerSummaryGql, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_circuit_breaker_summary"]).inc();
+        
+        let resilience = ctx
+            .data::<std::sync::Arc<crate::network_resilience::NetworkResilience>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_circuit_breaker_summary"]).inc();
+                DbError::InternalError("NetworkResilience not available".to_string())
+            })?;
+
+        let summary = resilience.circuit_breaker.get_summary();
+        
+        Ok(CircuitBreakerSummaryGql {
+            total_peers: summary.total_peers as i32,
+            closed: summary.closed as i32,
+            open: summary.open as i32,
+            half_open: summary.half_open as i32,
+        })
+    }
+
+    /// Get circuit breaker state for a specific peer
+    async fn get_circuit_breaker_state(&self, ctx: &Context<'_>, peer_id: String) -> Result<CircuitBreakerStatus, DbError> {
+        use crate::metrics;
+        use crate::network_resilience::CircuitState;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_circuit_breaker_state"]).inc();
+        
+        let resilience = ctx
+            .data::<std::sync::Arc<crate::network_resilience::NetworkResilience>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_circuit_breaker_state"]).inc();
+                DbError::InternalError("NetworkResilience not available".to_string())
+            })?;
+
+        let endpoint_id: iroh::EndpointId = peer_id.parse()
+            .map_err(|_| DbError::InvalidData("Invalid peer ID format".to_string()))?;
+        
+        let state = resilience.circuit_breaker.get_state(endpoint_id);
+        let state_str = match state {
+            CircuitState::Closed => "closed",
+            CircuitState::Open => "open",
+            CircuitState::HalfOpen => "half_open",
+        };
+        
+        Ok(CircuitBreakerStatus {
+            peer_id,
+            state: state_str.to_string(),
+        })
+    }
+
+    /// Get reputation summary
+    async fn get_reputation_summary(&self, ctx: &Context<'_>) -> Result<ReputationSummaryGql, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_reputation_summary"]).inc();
+        
+        let resilience = ctx
+            .data::<std::sync::Arc<crate::network_resilience::NetworkResilience>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_reputation_summary"]).inc();
+                DbError::InternalError("NetworkResilience not available".to_string())
+            })?;
+
+        let summary = resilience.reputation.get_summary();
+        
+        Ok(ReputationSummaryGql {
+            total_peers: summary.total_peers as i32,
+            banned_peers: summary.banned_peers as i32,
+            avg_score: summary.avg_score,
+            avg_reliability: summary.avg_reliability,
+        })
+    }
+
+    /// Get reputation for a specific peer
+    async fn get_peer_reputation(&self, ctx: &Context<'_>, peer_id: String) -> Result<Option<PeerReputationGql>, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_peer_reputation"]).inc();
+        
+        let resilience = ctx
+            .data::<std::sync::Arc<crate::network_resilience::NetworkResilience>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_peer_reputation"]).inc();
+                DbError::InternalError("NetworkResilience not available".to_string())
+            })?;
+
+        let endpoint_id: iroh::EndpointId = peer_id.parse()
+            .map_err(|_| DbError::InvalidData("Invalid peer ID format".to_string()))?;
+        
+        Ok(resilience.reputation.get_reputation(endpoint_id).map(|rep| PeerReputationGql {
+            peer_id,
+            score: rep.score,
+            successful_syncs: rep.successful_syncs as i64,
+            failed_syncs: rep.failed_syncs as i64,
+            successful_messages: rep.successful_messages as i64,
+            failed_messages: rep.failed_messages as i64,
+            avg_latency_ms: rep.avg_latency_ms,
+            bytes_received: rep.bytes_received as i64,
+            bytes_sent: rep.bytes_sent as i64,
+            reliability: rep.reliability(),
+            is_banned: rep.is_banned,
+            ban_reason: rep.ban_reason,
+            first_seen: rep.first_seen.to_rfc3339(),
+            last_seen: rep.last_seen.to_rfc3339(),
+        }))
+    }
+
+    /// Get top peers by reputation
+    async fn get_top_peers_by_reputation(&self, ctx: &Context<'_>, limit: Option<i32>) -> Result<Vec<PeerReputationGql>, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_top_peers_by_reputation"]).inc();
+        
+        let resilience = ctx
+            .data::<std::sync::Arc<crate::network_resilience::NetworkResilience>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_top_peers_by_reputation"]).inc();
+                DbError::InternalError("NetworkResilience not available".to_string())
+            })?;
+
+        let limit = limit.unwrap_or(10) as usize;
+        let top_peers = resilience.reputation.get_top_peers(limit);
+        
+        Ok(top_peers
+            .into_iter()
+            .map(|(peer_id, rep)| PeerReputationGql {
+                peer_id: peer_id.to_string(),
+                score: rep.score,
+                successful_syncs: rep.successful_syncs as i64,
+                failed_syncs: rep.failed_syncs as i64,
+                successful_messages: rep.successful_messages as i64,
+                failed_messages: rep.failed_messages as i64,
+                avg_latency_ms: rep.avg_latency_ms,
+                bytes_received: rep.bytes_received as i64,
+                bytes_sent: rep.bytes_sent as i64,
+                reliability: rep.reliability(),
+                is_banned: rep.is_banned,
+                ban_reason: rep.ban_reason,
+                first_seen: rep.first_seen.to_rfc3339(),
+                last_seen: rep.last_seen.to_rfc3339(),
+            })
+            .collect())
+    }
+
+    /// Get bandwidth statistics
+    async fn get_bandwidth_stats(&self, ctx: &Context<'_>) -> Result<BandwidthStatsGql, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_bandwidth_stats"]).inc();
+        
+        let resilience = ctx
+            .data::<std::sync::Arc<crate::network_resilience::NetworkResilience>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_bandwidth_stats"]).inc();
+                DbError::InternalError("NetworkResilience not available".to_string())
+            })?;
+
+        let stats = resilience.bandwidth.read().await.get_stats();
+        
+        Ok(BandwidthStatsGql {
+            total_uploaded: stats.total_uploaded as i64,
+            total_downloaded: stats.total_downloaded as i64,
+            upload_available: stats.upload_available.map(|v| v as i64),
+            download_available: stats.download_available.map(|v| v as i64),
+            upload_limit_bps: stats.upload_limit_bps as i64,
+            download_limit_bps: stats.download_limit_bps as i64,
+        })
+    }
+
+    /// Get combined network resilience summary
+    async fn get_network_resilience_summary(&self, ctx: &Context<'_>) -> Result<NetworkResilienceSummaryGql, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_network_resilience_summary"]).inc();
+        
+        let resilience = ctx
+            .data::<std::sync::Arc<crate::network_resilience::NetworkResilience>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_network_resilience_summary"]).inc();
+                DbError::InternalError("NetworkResilience not available".to_string())
+            })?;
+
+        let cb_summary = resilience.circuit_breaker.get_summary();
+        let rep_summary = resilience.reputation.get_summary();
+        let bw_stats = resilience.bandwidth.read().await.get_stats();
+        
+        Ok(NetworkResilienceSummaryGql {
+            circuit_breaker: CircuitBreakerSummaryGql {
+                total_peers: cb_summary.total_peers as i32,
+                closed: cb_summary.closed as i32,
+                open: cb_summary.open as i32,
+                half_open: cb_summary.half_open as i32,
+            },
+            reputation: ReputationSummaryGql {
+                total_peers: rep_summary.total_peers as i32,
+                banned_peers: rep_summary.banned_peers as i32,
+                avg_score: rep_summary.avg_score,
+                avg_reliability: rep_summary.avg_reliability,
+            },
+            bandwidth: BandwidthStatsGql {
+                total_uploaded: bw_stats.total_uploaded as i64,
+                total_downloaded: bw_stats.total_downloaded as i64,
+                upload_available: bw_stats.upload_available.map(|v| v as i64),
+                download_available: bw_stats.download_available.map(|v| v as i64),
+                upload_limit_bps: bw_stats.upload_limit_bps as i64,
+                download_limit_bps: bw_stats.download_limit_bps as i64,
+            },
+        })
+    }
+
     /// Get performance metrics from Prometheus
     async fn get_metrics(&self, _ctx: &Context<'_>) -> Result<PerformanceMetrics, DbError> {
         use crate::metrics::*;
@@ -2304,6 +2588,7 @@ pub async fn create_server(
     discovered_peers: Option<Arc<dashmap::DashMap<iroh::EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>>, // Discovered peers map with addresses
     iroh_network: Option<Arc<tokio::sync::Mutex<IrohNetwork>>>, // Pass IrohNetwork for dial_peer
     peer_registry: Option<Arc<PeerRegistry>>, // New: Centralized peer registry
+    network_resilience: Option<Arc<crate::network_resilience::NetworkResilience>>, // Network resilience (circuit breaker, reputation, bandwidth)
     relay_url: Option<String>, // Relay URL for node info
     mqtt_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::mqtt_bridge::GossipToMqttMessage>>,
     mqtt_to_gossip_tx: Option<
@@ -2352,6 +2637,11 @@ pub async fn create_server(
     // Add PeerRegistry if available (for peer mesh summary)
     if let Some(registry) = peer_registry {
         schema_builder = schema_builder.data(registry);
+    }
+
+    // Add NetworkResilience if available (for circuit breaker, reputation, bandwidth queries)
+    if let Some(resilience) = network_resilience {
+        schema_builder = schema_builder.data(resilience);
     }
 
     // Add relay URL if available
