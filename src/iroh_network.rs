@@ -564,6 +564,7 @@ impl IrohNetwork {
     }
     
     /// Connect to a bootstrap peer with exponential backoff retry logic
+    /// Tries direct IP connection first, then falls back to relay if direct fails
     async fn connect_bootstrap_peer_with_retry(
         endpoint: Endpoint,
         node_id: EndpointId,
@@ -575,31 +576,51 @@ impl IrohNetwork {
         
         let mut attempt = 0;
         let mut delay_ms = INITIAL_DELAY_MS;
+        let mut use_relay = false;
+        
+        // Get our relay URL to share with peers (if connected to relay)
+        let our_relay_url = endpoint.addr().relay_urls().next().cloned();
         
         loop {
             attempt += 1;
             
-            // Create EndpointAddr with node ID and socket address
-            let endpoint_addr = EndpointAddr::from_parts(
-                node_id,
-                [TransportAddr::Ip(socket_addr)],
-            );
+            // Build connection addresses - start with direct IP
+            let mut addrs: Vec<TransportAddr> = vec![TransportAddr::Ip(socket_addr)];
+            
+            // After first failed attempt, add relay fallback if available
+            if use_relay {
+                if let Some(ref relay_url) = our_relay_url {
+                    addrs.push(TransportAddr::Relay(relay_url.clone()));
+                    tracing::info!(
+                        "🔄 Adding relay fallback {} for peer {} (attempt {}/{})",
+                        relay_url,
+                        node_id.fmt_short(),
+                        attempt,
+                        MAX_RETRIES
+                    );
+                }
+            }
+            
+            // Create EndpointAddr with node ID and addresses (direct + optional relay)
+            let endpoint_addr = EndpointAddr::from_parts(node_id, addrs);
             
             tracing::info!(
-                "🔄 Attempting to connect to bootstrap peer {} at {} (attempt {}/{})",
+                "🔄 Attempting to connect to bootstrap peer {} at {} (attempt {}/{}){}",
                 node_id.fmt_short(),
                 socket_addr,
                 attempt,
-                MAX_RETRIES
+                MAX_RETRIES,
+                if use_relay { " [with relay fallback]" } else { "" }
             );
             
             match endpoint.connect(endpoint_addr, iroh_gossip::ALPN).await {
                 Ok(_conn) => {
                     tracing::info!(
-                        "✅ Successfully connected to bootstrap peer {} at {} (attempt {})",
+                        "✅ Successfully connected to bootstrap peer {} at {} (attempt {}){}",
                         node_id.fmt_short(),
                         socket_addr,
-                        attempt
+                        attempt,
+                        if use_relay { " via relay" } else { " direct" }
                     );
                     return Ok(());
                 }
@@ -627,6 +648,13 @@ impl IrohNetwork {
                         socket_addr,
                         e
                     );
+                    
+                    // Enable relay fallback after first direct attempt fails
+                    if !use_relay && our_relay_url.is_some() {
+                        use_relay = true;
+                        tracing::info!("🌐 Enabling relay fallback for next connection attempt");
+                    }
+                    
                     tracing::info!("⏳ Retrying in {}ms...", delay_ms);
                     
                     // Wait before retrying with exponential backoff
@@ -1260,6 +1288,10 @@ impl IrohNetwork {
                         
                         // Attempt to connect to unknown peers
                         let mut new_connections = 0;
+                        
+                        // Get our relay URL for fallback connections
+                        let our_relay_url = endpoint.addr().relay_urls().next().cloned();
+                        
                         for peer_addr_str in &announcement.connected_peers {
                             // Parse peer address in format "peerId@ip:port" or just "peerId"
                             if let Some(at_idx) = peer_addr_str.find('@') {
@@ -1281,13 +1313,16 @@ impl IrohNetwork {
                                         continue;
                                     }
                                     
-                                    // Attempt to connect to this peer with explicit address
+                                    // Attempt to connect to this peer with explicit address + relay fallback
                                     tracing::info!("🔗 Attempting to connect to peer {} at {} (discovered via {})", 
                                         peer_id, socket_addr, announcement.node_id);
                                     
-                                    // Add the peer's address to endpoint
-                                    let peer_addr = EndpointAddr::new(peer_id)
-                                        .with_ip_addr(socket_addr);
+                                    // Build addresses: direct IP + relay fallback
+                                    let mut addrs: Vec<TransportAddr> = vec![TransportAddr::Ip(socket_addr)];
+                                    if let Some(ref relay_url) = our_relay_url {
+                                        addrs.push(TransportAddr::Relay(relay_url.clone()));
+                                    }
+                                    let peer_addr = EndpointAddr::from_parts(peer_id, addrs);
                                     
                                     match endpoint.connect(peer_addr, iroh_gossip::ALPN).await {
                                         Ok(_conn) => {

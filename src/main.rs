@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
         .secret_key(secret_key)
         .discovery(dht_discovery)
         .discovery(mdns)
-        .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::empty())) // Enable relay mode
+        .relay_mode(iroh::RelayMode::Default) // Use n0's default relay servers for NAT traversal
         .bind_addr_v4(bind_addr) // Bind to fixed port 31001 for bootstrap peer connectivity
         .bind()
         .await?;
@@ -165,8 +165,8 @@ async fn main() -> Result<()> {
     tracing::info!("🆔 Iroh Node ID: {}", node_id);
     tracing::info!("🆔 Iroh Public Key: {}", hex::encode(node_id.as_bytes()));
     tracing::info!("═══════════════════════════════════════════════════════");
-    tracing::info!("🔄 Relay mode enabled - this node can act as a relay for other peers");
-    tracing::info!("🔍 Peer discovery: Use n0 DNS discovery or share node addresses manually");
+    tracing::info!("🔄 Relay mode enabled - using n0 default relay servers for NAT traversal");
+    tracing::info!("🔍 Peer discovery: DHT + mDNS + relay fallback for peers behind NAT");
 
     // Start Iroh relay server if enabled
     let relay_url_with_public_ip = if config.relay_config.enabled {
