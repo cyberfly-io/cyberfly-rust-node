@@ -30,9 +30,6 @@ USER cyberfly
 # Expose ports
 EXPOSE 31001 31002 31003 31006
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["/app/cyberfly-rust-node", "--version"] || exit 1
 
 # Run the application
 CMD ["/app/cyberfly-rust-node"]
