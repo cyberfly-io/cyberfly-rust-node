@@ -28,7 +28,7 @@ pub use crate::crypto::{verify_signature, validate_timestamp, secure_hex_decode,
 pub use crate::error::DbError;
 pub use crate::graphql::{QueryRoot, MutationRoot, SubscriptionRoot, ApiSchema, SignedData, StorageResult, QueryResult};
 pub use crate::indexing::{IndexManager, SecondaryIndex, IndexType, QueryOperator, QueryResult as IndexQueryResult};
-pub use crate::storage::{RedisStorage, StoreType, SignatureMetadata, StoredEntry, SortedSetEntry, BatchWriter, BatchWriterStats};
+pub use crate::storage::{RedisStorage, StoreType, SignatureMetadata, StoredEntry, SortedSetEntry, BatchWriter, BatchWriterStats, TtlMetadata, TtlInfo};
 pub use crate::sync::{SyncStore, SyncManager, SignedOperation, SyncMessage};
 pub use crate::peer_registry::{PeerRegistry, PeerRegistryConfig, PeerMeta, PeerStatus, PeerCapabilities, PeerSummary};
 pub use crate::gossip_discovery::{GossipDiscoveryBuilder, DiscoverySender, DiscoveryReceiver, DiscoveryNode, PeerInfo, NodeCapabilities, NodeId as GossipNodeId};

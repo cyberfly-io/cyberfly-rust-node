@@ -48,29 +48,92 @@ pub struct SignatureMetadata {
     pub timestamp: i64,
 }
 
+/// TTL (Time-To-Live) metadata for data expiration
+#[derive(Debug, Clone, Serialize, Deserialize, SimpleObject)]
+pub struct TtlMetadata {
+    /// TTL duration in seconds (None = no expiration)
+    pub ttl_seconds: Option<u64>,
+    /// Absolute expiration timestamp (Unix millis)
+    pub expires_at: Option<i64>,
+    /// Creation timestamp (Unix millis)
+    pub created_at: i64,
+}
+
+impl TtlMetadata {
+    /// Create new TTL metadata with optional TTL
+    pub fn new(ttl_seconds: Option<u64>) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        
+        let expires_at = ttl_seconds.map(|ttl| now + (ttl as i64 * 1000));
+        
+        Self {
+            ttl_seconds,
+            expires_at,
+            created_at: now,
+        }
+    }
+    
+    /// Check if this entry has expired
+    pub fn is_expired(&self) -> bool {
+        if let Some(expires_at) = self.expires_at {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            now > expires_at
+        } else {
+            false
+        }
+    }
+    
+    /// Get remaining TTL in seconds (None if no expiration or expired)
+    pub fn remaining_ttl_seconds(&self) -> Option<u64> {
+        if let Some(expires_at) = self.expires_at {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            if now < expires_at {
+                Some(((expires_at - now) / 1000) as u64)
+            } else {
+                None // Expired
+            }
+        } else {
+            None // No expiration set
+        }
+    }
+}
+
 // Data structures for different Redis-like types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StringValue {
     value: String,
     metadata: Option<SignatureMetadata>,
+    ttl: Option<TtlMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HashValue {
     fields: HashMap<String, String>,
     metadata: Option<SignatureMetadata>,
+    ttl: Option<TtlMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ListValue {
     items: Vec<String>,
     metadata: Option<SignatureMetadata>,
+    ttl: Option<TtlMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SetValue {
     members: HashSet<String>,
     metadata: Option<SignatureMetadata>,
+    ttl: Option<TtlMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +142,7 @@ struct SortedSetValue {
     // Key is the serialized JSON, value is the score (timestamp)
     members: BTreeMap<String, f64>,
     metadata: Option<SignatureMetadata>,
+    ttl: Option<TtlMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,24 +167,28 @@ struct JsonValue {
     // Track _id for deduplication if present
     id: Option<String>,
     metadata: Option<SignatureMetadata>,
+    ttl: Option<TtlMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StreamValue {
     entries: Vec<(String, Vec<(String, String)>)>,
     metadata: Option<SignatureMetadata>,
+    ttl: Option<TtlMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TimeSeriesValue {
     points: BTreeMap<i64, f64>,
     metadata: Option<SignatureMetadata>,
+    ttl: Option<TtlMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GeoValue {
     locations: HashMap<String, (f64, f64)>,
     metadata: Option<SignatureMetadata>,
+    ttl: Option<TtlMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -514,12 +582,45 @@ impl BlobStorage {
         Ok(())
     }
 
+    /// Helper to extract TTL metadata from a StoredValue
+    fn get_ttl_metadata(value: &StoredValue) -> Option<&TtlMetadata> {
+        match value {
+            StoredValue::String(v) => v.ttl.as_ref(),
+            StoredValue::Hash(v) => v.ttl.as_ref(),
+            StoredValue::List(v) => v.ttl.as_ref(),
+            StoredValue::Set(v) => v.ttl.as_ref(),
+            StoredValue::SortedSet(v) => v.ttl.as_ref(),
+            StoredValue::Json(v) => v.ttl.as_ref(),
+            StoredValue::Stream(v) => v.ttl.as_ref(),
+            StoredValue::TimeSeries(v) => v.ttl.as_ref(),
+            StoredValue::Geo(v) => v.ttl.as_ref(),
+        }
+    }
+
+    /// Check if a value has expired based on TTL
+    fn is_value_expired(value: &StoredValue) -> bool {
+        if let Some(ttl) = Self::get_ttl_metadata(value) {
+            ttl.is_expired()
+        } else {
+            false
+        }
+    }
+
     async fn get_value(&self, key: &str) -> Result<Option<StoredValue>> {
         let timer = Timer::new();
         
         // Check cache first (fast path, Arc-based zero-copy)
         if let Some(value) = self.cache.get(key) {
-            // Clone Arc pointer (cheap) then deref to get StoredValue
+            // Check TTL before returning cached value
+            if Self::is_value_expired(&value) {
+                // Expired - invalidate cache and delete from storage
+                self.cache.invalidate(key).await;
+                self.delete_key(key).await.ok(); // Best effort cleanup
+                metrics::TTL_KEYS_EXPIRED.inc();
+                timer.observe_duration_seconds(&metrics::READ_LATENCY);
+                metrics::STORAGE_READS.inc();
+                return Ok(None);
+            }
             timer.observe_duration_seconds(&metrics::READ_LATENCY);
             metrics::STORAGE_READS.inc();
             return Ok(Some((*value).clone()));
@@ -559,6 +660,16 @@ impl BlobStorage {
         .await
         .map_err(|e| anyhow::anyhow!("Thread join error: {}", e))??;
 
+        // Check TTL before caching and returning
+        if Self::is_value_expired(&value) {
+            // Expired - delete from storage
+            self.delete_key(key).await.ok(); // Best effort cleanup
+            metrics::TTL_KEYS_EXPIRED.inc();
+            timer.observe_duration_seconds(&metrics::READ_LATENCY);
+            metrics::STORAGE_READS.inc();
+            return Ok(None);
+        }
+
         // Update cache (Arc-based)
         self.cache.insert(key.to_string(), value.clone()).await;
 
@@ -579,9 +690,25 @@ impl BlobStorage {
         value: &str,
         metadata: Option<SignatureMetadata>,
     ) -> Result<()> {
+        self.set_string_with_ttl(key, value, metadata, None).await
+    }
+
+    /// Set string with optional TTL (seconds)
+    pub async fn set_string_with_ttl(
+        &self,
+        key: &str,
+        value: &str,
+        metadata: Option<SignatureMetadata>,
+        ttl_seconds: Option<u64>,
+    ) -> Result<()> {
+        let ttl = ttl_seconds.map(|s| TtlMetadata::new(Some(s)));
+        if ttl.is_some() {
+            metrics::TTL_KEYS_TOTAL.inc();
+        }
         let stored_value = StoredValue::String(StringValue {
             value: value.to_string(),
             metadata,
+            ttl,
         });
         self.store_value(key, stored_value, StoreType::String).await
     }
@@ -606,11 +733,30 @@ impl BlobStorage {
         value: &str,
         metadata: Option<SignatureMetadata>,
     ) -> Result<()> {
+        self.set_hash_with_ttl(key, field, value, metadata, None).await
+    }
+
+    /// Set hash field with optional TTL (seconds)
+    pub async fn set_hash_with_ttl(
+        &self,
+        key: &str,
+        field: &str,
+        value: &str,
+        metadata: Option<SignatureMetadata>,
+        ttl_seconds: Option<u64>,
+    ) -> Result<()> {
         let mut hash_value = match self.get_value(key).await? {
             Some(StoredValue::Hash(hv)) => hv,
-            None => HashValue {
-                fields: HashMap::new(),
-                metadata: metadata.clone(),
+            None => {
+                let ttl = ttl_seconds.map(|s| TtlMetadata::new(Some(s)));
+                if ttl.is_some() {
+                    metrics::TTL_KEYS_TOTAL.inc();
+                }
+                HashValue {
+                    fields: HashMap::new(),
+                    metadata: metadata.clone(),
+                    ttl,
+                }
             },
             _ => return Err(anyhow::anyhow!("Key is not a hash type")),
         };
@@ -652,11 +798,29 @@ impl BlobStorage {
         value: &str,
         metadata: Option<SignatureMetadata>,
     ) -> Result<()> {
+        self.push_list_with_ttl(key, value, metadata, None).await
+    }
+
+    /// Push to list with optional TTL (seconds)
+    pub async fn push_list_with_ttl(
+        &self,
+        key: &str,
+        value: &str,
+        metadata: Option<SignatureMetadata>,
+        ttl_seconds: Option<u64>,
+    ) -> Result<()> {
         let mut list_value = match self.get_value(key).await? {
             Some(StoredValue::List(lv)) => lv,
-            None => ListValue {
-                items: Vec::new(),
-                metadata: metadata.clone(),
+            None => {
+                let ttl = ttl_seconds.map(|s| TtlMetadata::new(Some(s)));
+                if ttl.is_some() {
+                    metrics::TTL_KEYS_TOTAL.inc();
+                }
+                ListValue {
+                    items: Vec::new(),
+                    metadata: metadata.clone(),
+                    ttl,
+                }
             },
             _ => return Err(anyhow::anyhow!("Key is not a list type")),
         };
@@ -706,11 +870,29 @@ impl BlobStorage {
         member: &str,
         metadata: Option<SignatureMetadata>,
     ) -> Result<()> {
+        self.add_set_with_ttl(key, member, metadata, None).await
+    }
+
+    /// Add to set with optional TTL (seconds)
+    pub async fn add_set_with_ttl(
+        &self,
+        key: &str,
+        member: &str,
+        metadata: Option<SignatureMetadata>,
+        ttl_seconds: Option<u64>,
+    ) -> Result<()> {
         let mut set_value = match self.get_value(key).await? {
             Some(StoredValue::Set(sv)) => sv,
-            None => SetValue {
-                members: HashSet::new(),
-                metadata: metadata.clone(),
+            None => {
+                let ttl = ttl_seconds.map(|s| TtlMetadata::new(Some(s)));
+                if ttl.is_some() {
+                    metrics::TTL_KEYS_TOTAL.inc();
+                }
+                SetValue {
+                    members: HashSet::new(),
+                    metadata: metadata.clone(),
+                    ttl,
+                }
             },
             _ => return Err(anyhow::anyhow!("Key is not a set type")),
         };
@@ -744,11 +926,30 @@ impl BlobStorage {
         member: &str,
         metadata: Option<SignatureMetadata>,
     ) -> Result<()> {
+        self.add_sorted_set_with_ttl(key, score, member, metadata, None).await
+    }
+
+    /// Add to sorted set with optional TTL (seconds)
+    pub async fn add_sorted_set_with_ttl(
+        &self,
+        key: &str,
+        score: f64,
+        member: &str,
+        metadata: Option<SignatureMetadata>,
+        ttl_seconds: Option<u64>,
+    ) -> Result<()> {
         let mut sorted_set_value = match self.get_value(key).await? {
             Some(StoredValue::SortedSet(ssv)) => ssv,
-            None => SortedSetValue {
-                members: BTreeMap::new(),
-                metadata: metadata.clone(),
+            None => {
+                let ttl = ttl_seconds.map(|s| TtlMetadata::new(Some(s)));
+                if ttl.is_some() {
+                    metrics::TTL_KEYS_TOTAL.inc();
+                }
+                SortedSetValue {
+                    members: BTreeMap::new(),
+                    metadata: metadata.clone(),
+                    ttl,
+                }
             },
             _ => return Err(anyhow::anyhow!("Key is not a sorted set type")),
         };
@@ -790,6 +991,7 @@ impl BlobStorage {
             None => SortedSetValue {
                 members: BTreeMap::new(),
                 metadata: metadata.clone(),
+                ttl: None,
             },
             _ => return Err(anyhow::anyhow!("Key is not a sorted set type")),
         };
@@ -984,6 +1186,18 @@ impl BlobStorage {
         value: &str,
         metadata: Option<SignatureMetadata>,
     ) -> Result<()> {
+        self.set_json_with_ttl(key, _path, value, metadata, None).await
+    }
+
+    /// Set JSON with optional TTL (seconds)
+    pub async fn set_json_with_ttl(
+        &self,
+        key: &str,
+        _path: &str,
+        value: &str,
+        metadata: Option<SignatureMetadata>,
+        ttl_seconds: Option<u64>,
+    ) -> Result<()> {
         let json_data: serde_json::Value = serde_json::from_str(value)?;
 
         // Extract _id if present for deduplication
@@ -996,11 +1210,17 @@ impl BlobStorage {
         if let Some(ref doc_id) = id {
             self.delete_json_by_id(key, doc_id).await?;
         }
+        
+        let ttl = ttl_seconds.map(|s| TtlMetadata::new(Some(s)));
+        if ttl.is_some() {
+            metrics::TTL_KEYS_TOTAL.inc();
+        }
 
         let json_value = JsonValue {
             data: json_data,
             id,
             metadata,
+            ttl,
         };
         self.store_value(key, StoredValue::Json(json_value), StoreType::Json)
             .await
@@ -1084,11 +1304,30 @@ impl BlobStorage {
         fields: &[(String, String)],
         metadata: Option<SignatureMetadata>,
     ) -> Result<String> {
+        self.xadd_with_ttl(key, id, fields, metadata, None).await
+    }
+
+    /// Add to stream with optional TTL (seconds)
+    pub async fn xadd_with_ttl(
+        &self,
+        key: &str,
+        id: &str,
+        fields: &[(String, String)],
+        metadata: Option<SignatureMetadata>,
+        ttl_seconds: Option<u64>,
+    ) -> Result<String> {
         let mut stream_value = match self.get_value(key).await? {
             Some(StoredValue::Stream(sv)) => sv,
-            None => StreamValue {
-                entries: Vec::new(),
-                metadata: metadata.clone(),
+            None => {
+                let ttl = ttl_seconds.map(|s| TtlMetadata::new(Some(s)));
+                if ttl.is_some() {
+                    metrics::TTL_KEYS_TOTAL.inc();
+                }
+                StreamValue {
+                    entries: Vec::new(),
+                    metadata: metadata.clone(),
+                    ttl,
+                }
             },
             _ => return Err(anyhow::anyhow!("Key is not a stream type")),
         };
@@ -1233,11 +1472,30 @@ impl BlobStorage {
         value: f64,
         metadata: Option<SignatureMetadata>,
     ) -> Result<()> {
+        self.ts_add_with_ttl(key, timestamp, value, metadata, None).await
+    }
+
+    /// Add time series data with optional TTL (seconds)
+    pub async fn ts_add_with_ttl(
+        &self,
+        key: &str,
+        timestamp: i64,
+        value: f64,
+        metadata: Option<SignatureMetadata>,
+        ttl_seconds: Option<u64>,
+    ) -> Result<()> {
         let mut ts_value = match self.get_value(key).await? {
             Some(StoredValue::TimeSeries(tsv)) => tsv,
-            None => TimeSeriesValue {
-                points: BTreeMap::new(),
-                metadata: metadata.clone(),
+            None => {
+                let ttl = ttl_seconds.map(|s| TtlMetadata::new(Some(s)));
+                if ttl.is_some() {
+                    metrics::TTL_KEYS_TOTAL.inc();
+                }
+                TimeSeriesValue {
+                    points: BTreeMap::new(),
+                    metadata: metadata.clone(),
+                    ttl,
+                }
             },
             _ => return Err(anyhow::anyhow!("Key is not a timeseries type")),
         };
@@ -1331,11 +1589,31 @@ impl BlobStorage {
         member: &str,
         metadata: Option<SignatureMetadata>,
     ) -> Result<usize> {
+        self.geoadd_with_ttl(key, longitude, latitude, member, metadata, None).await
+    }
+
+    /// Add geospatial data with optional TTL (seconds)
+    pub async fn geoadd_with_ttl(
+        &self,
+        key: &str,
+        longitude: f64,
+        latitude: f64,
+        member: &str,
+        metadata: Option<SignatureMetadata>,
+        ttl_seconds: Option<u64>,
+    ) -> Result<usize> {
         let mut geo_value = match self.get_value(key).await? {
             Some(StoredValue::Geo(gv)) => gv,
-            None => GeoValue {
-                locations: HashMap::new(),
-                metadata: metadata.clone(),
+            None => {
+                let ttl = ttl_seconds.map(|s| TtlMetadata::new(Some(s)));
+                if ttl.is_some() {
+                    metrics::TTL_KEYS_TOTAL.inc();
+                }
+                GeoValue {
+                    locations: HashMap::new(),
+                    metadata: metadata.clone(),
+                    ttl,
+                }
             },
             _ => return Err(anyhow::anyhow!("Key is not a geo type")),
         };
@@ -2000,6 +2278,280 @@ impl BlobStorage {
 
         Ok(res)
     }
+
+    // ============================================================================
+    // TTL (Time-To-Live) Operations
+    // ============================================================================
+
+    /// Get TTL info for a key
+    pub async fn get_ttl(&self, key: &str) -> Result<Option<TtlInfo>> {
+        match self.get_value(key).await? {
+            Some(value) => {
+                if let Some(ttl) = Self::get_ttl_metadata(&value) {
+                    Ok(Some(TtlInfo {
+                        ttl_seconds: ttl.ttl_seconds,
+                        expires_at: ttl.expires_at,
+                        created_at: ttl.created_at,
+                        remaining_seconds: ttl.remaining_ttl_seconds(),
+                        has_ttl: ttl.ttl_seconds.is_some(),
+                    }))
+                } else {
+                    Ok(Some(TtlInfo {
+                        ttl_seconds: None,
+                        expires_at: None,
+                        created_at: 0,
+                        remaining_seconds: None,
+                        has_ttl: false,
+                    }))
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Set/update TTL for an existing key (like Redis EXPIRE command)
+    pub async fn set_key_ttl(&self, key: &str, ttl_seconds: u64) -> Result<bool> {
+        let value = match self.get_value(key).await? {
+            Some(v) => v,
+            None => return Ok(false), // Key doesn't exist
+        };
+
+        let new_ttl = Some(TtlMetadata::new(Some(ttl_seconds)));
+
+        // Create updated value with new TTL
+        let updated_value = match value {
+            StoredValue::String(mut v) => {
+                v.ttl = new_ttl;
+                StoredValue::String(v)
+            }
+            StoredValue::Hash(mut v) => {
+                v.ttl = new_ttl;
+                StoredValue::Hash(v)
+            }
+            StoredValue::List(mut v) => {
+                v.ttl = new_ttl;
+                StoredValue::List(v)
+            }
+            StoredValue::Set(mut v) => {
+                v.ttl = new_ttl;
+                StoredValue::Set(v)
+            }
+            StoredValue::SortedSet(mut v) => {
+                v.ttl = new_ttl;
+                StoredValue::SortedSet(v)
+            }
+            StoredValue::Json(mut v) => {
+                v.ttl = new_ttl;
+                StoredValue::Json(v)
+            }
+            StoredValue::Stream(mut v) => {
+                v.ttl = new_ttl;
+                StoredValue::Stream(v)
+            }
+            StoredValue::TimeSeries(mut v) => {
+                v.ttl = new_ttl;
+                StoredValue::TimeSeries(v)
+            }
+            StoredValue::Geo(mut v) => {
+                v.ttl = new_ttl;
+                StoredValue::Geo(v)
+            }
+        };
+
+        let store_type = match &updated_value {
+            StoredValue::String(_) => StoreType::String,
+            StoredValue::Hash(_) => StoreType::Hash,
+            StoredValue::List(_) => StoreType::List,
+            StoredValue::Set(_) => StoreType::Set,
+            StoredValue::SortedSet(_) => StoreType::SortedSet,
+            StoredValue::Json(_) => StoreType::Json,
+            StoredValue::Stream(_) => StoreType::Stream,
+            StoredValue::TimeSeries(_) => StoreType::TimeSeries,
+            StoredValue::Geo(_) => StoreType::Geo,
+        };
+
+        self.store_value(key, updated_value, store_type).await?;
+        metrics::TTL_KEYS_TOTAL.inc();
+        Ok(true)
+    }
+
+    /// Remove TTL from a key (like Redis PERSIST command)
+    pub async fn persist_key(&self, key: &str) -> Result<bool> {
+        let value = match self.get_value(key).await? {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+
+        // Create updated value without TTL
+        let updated_value = match value {
+            StoredValue::String(mut v) => {
+                if v.ttl.is_some() {
+                    v.ttl = None;
+                    metrics::TTL_KEYS_TOTAL.dec();
+                }
+                StoredValue::String(v)
+            }
+            StoredValue::Hash(mut v) => {
+                if v.ttl.is_some() {
+                    v.ttl = None;
+                    metrics::TTL_KEYS_TOTAL.dec();
+                }
+                StoredValue::Hash(v)
+            }
+            StoredValue::List(mut v) => {
+                if v.ttl.is_some() {
+                    v.ttl = None;
+                    metrics::TTL_KEYS_TOTAL.dec();
+                }
+                StoredValue::List(v)
+            }
+            StoredValue::Set(mut v) => {
+                if v.ttl.is_some() {
+                    v.ttl = None;
+                    metrics::TTL_KEYS_TOTAL.dec();
+                }
+                StoredValue::Set(v)
+            }
+            StoredValue::SortedSet(mut v) => {
+                if v.ttl.is_some() {
+                    v.ttl = None;
+                    metrics::TTL_KEYS_TOTAL.dec();
+                }
+                StoredValue::SortedSet(v)
+            }
+            StoredValue::Json(mut v) => {
+                if v.ttl.is_some() {
+                    v.ttl = None;
+                    metrics::TTL_KEYS_TOTAL.dec();
+                }
+                StoredValue::Json(v)
+            }
+            StoredValue::Stream(mut v) => {
+                if v.ttl.is_some() {
+                    v.ttl = None;
+                    metrics::TTL_KEYS_TOTAL.dec();
+                }
+                StoredValue::Stream(v)
+            }
+            StoredValue::TimeSeries(mut v) => {
+                if v.ttl.is_some() {
+                    v.ttl = None;
+                    metrics::TTL_KEYS_TOTAL.dec();
+                }
+                StoredValue::TimeSeries(v)
+            }
+            StoredValue::Geo(mut v) => {
+                if v.ttl.is_some() {
+                    v.ttl = None;
+                    metrics::TTL_KEYS_TOTAL.dec();
+                }
+                StoredValue::Geo(v)
+            }
+        };
+
+        let store_type = match &updated_value {
+            StoredValue::String(_) => StoreType::String,
+            StoredValue::Hash(_) => StoreType::Hash,
+            StoredValue::List(_) => StoreType::List,
+            StoredValue::Set(_) => StoreType::Set,
+            StoredValue::SortedSet(_) => StoreType::SortedSet,
+            StoredValue::Json(_) => StoreType::Json,
+            StoredValue::Stream(_) => StoreType::Stream,
+            StoredValue::TimeSeries(_) => StoreType::TimeSeries,
+            StoredValue::Geo(_) => StoreType::Geo,
+        };
+
+        self.store_value(key, updated_value, store_type).await?;
+        Ok(true)
+    }
+
+    /// Delete a key (internal helper for TTL cleanup)
+    async fn delete_key(&self, key: &str) -> Result<()> {
+        self.delete(key).await
+    }
+
+    /// Run TTL cleanup - scans keys and removes expired ones
+    /// Returns number of expired keys removed
+    pub async fn cleanup_expired_keys(&self) -> Result<usize> {
+        let timer = metrics::Timer::new();
+        let mut expired_count = 0;
+        let mut scanned_count = 0;
+
+        // Get all keys from index
+        let all_keys: Vec<String> = {
+            let mut keys = Vec::new();
+            for item in self.index_tree.iter() {
+                if let Ok((k, _)) = item {
+                    if let Ok(key_str) = String::from_utf8(k.to_vec()) {
+                        keys.push(key_str);
+                    }
+                }
+            }
+            keys
+        };
+
+        scanned_count = all_keys.len();
+        metrics::TTL_KEYS_SCANNED.set(scanned_count as i64);
+
+        for key in all_keys {
+            // Try to get the value - this will automatically check TTL and clean up
+            // if expired (lazy cleanup on read)
+            if let Ok(None) = self.get_value(&key).await {
+                // Value was expired and cleaned up during get
+                expired_count += 1;
+            }
+        }
+
+        timer.observe_duration_seconds(&metrics::TTL_CLEANUP_DURATION);
+        
+        if expired_count > 0 {
+            tracing::info!("TTL cleanup: scanned {} keys, expired {} keys", scanned_count, expired_count);
+        }
+
+        Ok(expired_count)
+    }
+
+    /// Start background TTL cleanup task
+    /// Runs cleanup every `interval_seconds` (default: 60 seconds)
+    pub fn start_ttl_cleanup_task(storage: BlobStorage, interval_seconds: Option<u64>) {
+        let interval = std::time::Duration::from_secs(interval_seconds.unwrap_or(60));
+        
+        tokio::spawn(async move {
+            let mut interval_timer = tokio::time::interval(interval);
+            
+            loop {
+                interval_timer.tick().await;
+                
+                match storage.cleanup_expired_keys().await {
+                    Ok(expired) => {
+                        if expired > 0 {
+                            tracing::debug!("TTL cleanup task: removed {} expired keys", expired);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("TTL cleanup task error: {}", e);
+                    }
+                }
+            }
+        });
+        
+        tracing::info!("TTL cleanup background task started (interval: {}s)", interval.as_secs());
+    }
+}
+
+/// TTL information for a key
+#[derive(Debug, Clone, Serialize, Deserialize, SimpleObject)]
+pub struct TtlInfo {
+    /// Original TTL in seconds (None if no TTL was set)
+    pub ttl_seconds: Option<u64>,
+    /// Absolute expiration timestamp in milliseconds (None if no TTL)
+    pub expires_at: Option<i64>,
+    /// Creation timestamp in milliseconds
+    pub created_at: i64,
+    /// Remaining TTL in seconds (None if expired or no TTL)
+    pub remaining_seconds: Option<u64>,
+    /// Whether this key has a TTL configured
+    pub has_ttl: bool,
 }
 
 // Type alias for backward compatibility

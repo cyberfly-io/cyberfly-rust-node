@@ -204,6 +204,37 @@ lazy_static! {
         Opts::new("bandwidth_throttled_total", "Number of throttled requests by type and scope"),
         &["direction", "scope"]
     ).unwrap();
+    
+    // ============================================================================
+    // TTL (Time-To-Live) Metrics
+    // ============================================================================
+    
+    /// Total number of keys with TTL set
+    pub static ref TTL_KEYS_TOTAL: IntGauge = IntGauge::new(
+        "ttl_keys_total",
+        "Current number of keys with TTL configured"
+    ).unwrap();
+    
+    /// Total number of keys expired and cleaned up
+    pub static ref TTL_KEYS_EXPIRED: IntCounter = IntCounter::new(
+        "ttl_keys_expired_total",
+        "Total number of keys that have expired"
+    ).unwrap();
+    
+    /// TTL cleanup cycle duration
+    pub static ref TTL_CLEANUP_DURATION: Histogram = Histogram::with_opts(
+        HistogramOpts::new(
+            "ttl_cleanup_duration_seconds",
+            "TTL cleanup cycle duration in seconds"
+        )
+        .buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])
+    ).unwrap();
+    
+    /// Number of keys scanned in last cleanup cycle
+    pub static ref TTL_KEYS_SCANNED: IntGauge = IntGauge::new(
+        "ttl_keys_scanned_last",
+        "Number of keys scanned in the last TTL cleanup cycle"
+    ).unwrap();
 }
 
 /// Initialize metrics registry
@@ -257,6 +288,12 @@ pub fn init_metrics() {
     REGISTRY.register(Box::new(PEERS_BANNED.clone())).unwrap();
     REGISTRY.register(Box::new(BANDWIDTH_BYTES.clone())).unwrap();
     REGISTRY.register(Box::new(BANDWIDTH_THROTTLED.clone())).unwrap();
+    
+    // Register TTL metrics
+    REGISTRY.register(Box::new(TTL_KEYS_TOTAL.clone())).unwrap();
+    REGISTRY.register(Box::new(TTL_KEYS_EXPIRED.clone())).unwrap();
+    REGISTRY.register(Box::new(TTL_CLEANUP_DURATION.clone())).unwrap();
+    REGISTRY.register(Box::new(TTL_KEYS_SCANNED.clone())).unwrap();
     
     tracing::info!("Metrics registry initialized with {} collectors", REGISTRY.gather().len());
 }

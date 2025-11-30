@@ -2,6 +2,42 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::env;
 
+/// TTL tiers for user plans (in seconds)
+/// These will be fetched from smart contract in the future
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TtlTiers {
+    pub free: u64,       // 24 hours
+    pub basic: u64,      // 7 days
+    pub pro: u64,        // 30 days
+    pub enterprise: u64, // 365 days (effectively unlimited for most use cases)
+}
+
+impl Default for TtlTiers {
+    fn default() -> Self {
+        Self {
+            free: 86_400,        // 24 hours
+            basic: 604_800,      // 7 days
+            pro: 2_592_000,      // 30 days
+            enterprise: 31_536_000, // 365 days
+        }
+    }
+}
+
+impl TtlTiers {
+    /// Get TTL for a given plan tier
+    /// TODO: Integrate with smart contract to fetch user's actual plan
+    pub fn get_ttl_for_plan(&self, _plan: &str) -> u64 {
+        // For now, all users are on free tier
+        // In future: query smart contract by public_key to get user's plan
+        self.free
+    }
+    
+    /// Get the default TTL (free tier)
+    pub fn default_ttl(&self) -> u64 {
+        self.free
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub api_host: String,
@@ -10,6 +46,7 @@ pub struct Config {
     pub mqtt_config: MqttConfig,
     pub relay_config: RelayConfig,
     pub kadena_config: Option<KadenaConfig>,
+    pub ttl_tiers: TtlTiers,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +196,27 @@ impl Config {
             None
         };
 
+        // TTL tier configuration (can be overridden via env vars)
+        let ttl_free = env::var("TTL_FREE_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(86_400); // 24 hours default
+        
+        let ttl_basic = env::var("TTL_BASIC_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(604_800); // 7 days default
+        
+        let ttl_pro = env::var("TTL_PRO_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_592_000); // 30 days default
+        
+        let ttl_enterprise = env::var("TTL_ENTERPRISE_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(31_536_000); // 365 days default
+
         Ok(Self {
             api_host,
             api_port,
@@ -176,6 +234,12 @@ impl Config {
                 relay_url,
             },
             kadena_config,
+            ttl_tiers: TtlTiers {
+                free: ttl_free,
+                basic: ttl_basic,
+                pro: ttl_pro,
+                enterprise: ttl_enterprise,
+            },
         })
     }
 }

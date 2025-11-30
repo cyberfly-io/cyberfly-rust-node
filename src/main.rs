@@ -537,6 +537,10 @@ async fn main() -> Result<()> {
     network_resilience::NetworkResilience::start_background_tasks(network_resilience.clone());
     tracing::info!("NetworkResilience initialized (circuit breaker, reputation, bandwidth throttling)");
     
+    // Start TTL cleanup background task (runs every 60 seconds)
+    storage::BlobStorage::start_ttl_cleanup_task(storage.clone(), Some(60));
+    tracing::info!("TTL cleanup background task started (interval: 60s)");
+    
     // Wrap network in Arc so we can share it with GraphQL while still moving it to tokio::spawn
     let network = Arc::new(tokio::sync::Mutex::new(network));
     let network_for_graphql = network.clone();

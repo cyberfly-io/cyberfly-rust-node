@@ -108,6 +108,132 @@ pub struct GeoLocation {
     pub latitude: Option<f64>,
 }
 
+// ============================================================================
+// TTL (Time-To-Live) Types
+// ============================================================================
+
+/// TTL information for a key
+#[derive(SimpleObject, Clone)]
+pub struct TtlInfoGql {
+    /// Original TTL in seconds (null if no TTL was set)
+    pub ttl_seconds: Option<i64>,
+    /// Absolute expiration timestamp in milliseconds (null if no TTL)
+    pub expires_at: Option<String>,
+    /// Creation timestamp in milliseconds
+    pub created_at: String,
+    /// Remaining TTL in seconds (null if expired or no TTL)
+    pub remaining_seconds: Option<i64>,
+    /// Whether this key has a TTL configured
+    pub has_ttl: bool,
+    /// Whether the key exists
+    pub key_exists: bool,
+}
+
+/// Result of TTL operations
+#[derive(SimpleObject, Clone)]
+pub struct TtlResult {
+    /// Whether the operation succeeded
+    pub success: bool,
+    /// The key that was operated on
+    pub key: String,
+    /// Status message
+    pub message: String,
+}
+
+// ============================================================================
+// Comprehensive Health Types
+// ============================================================================
+
+/// Storage health status
+#[derive(SimpleObject, Clone)]
+pub struct StorageHealth {
+    /// Storage is operational
+    pub healthy: bool,
+    /// Total storage reads
+    pub total_reads: i64,
+    /// Total storage writes
+    pub total_writes: i64,
+    /// Cache hit rate percentage
+    pub cache_hit_rate: f64,
+    /// Hot cache size
+    pub cache_size_hot: i64,
+    /// Warm cache size
+    pub cache_size_warm: i64,
+}
+
+/// Network health status
+#[derive(SimpleObject, Clone)]
+pub struct NetworkHealth {
+    /// Network is operational
+    pub healthy: bool,
+    /// Number of connected peers
+    pub connected_peers: i64,
+    /// Number of discovered peers
+    pub discovered_peers: i64,
+    /// Bytes sent
+    pub bytes_sent: i64,
+    /// Bytes received
+    pub bytes_received: i64,
+}
+
+/// Sync health status  
+#[derive(SimpleObject, Clone)]
+pub struct SyncHealth {
+    /// Sync is operational
+    pub healthy: bool,
+    /// Total sync operations
+    pub total_operations: i64,
+    /// Total conflicts resolved
+    pub conflicts_resolved: i64,
+    /// Total CRDT merges
+    pub total_merges: i64,
+}
+
+/// Resilience health status
+#[derive(SimpleObject, Clone)]
+pub struct ResilienceHealth {
+    /// Resilience systems are healthy
+    pub healthy: bool,
+    /// Number of circuit breaker trips
+    pub circuit_breaker_trips: i64,
+    /// Number of banned peers
+    pub banned_peers: i64,
+}
+
+/// TTL system health
+#[derive(SimpleObject, Clone)]
+pub struct TtlHealth {
+    /// TTL system is operational
+    pub healthy: bool,
+    /// Total keys with TTL
+    pub keys_with_ttl: i64,
+    /// Total keys expired
+    pub keys_expired: i64,
+}
+
+/// Comprehensive health check response
+#[derive(SimpleObject, Clone)]
+pub struct HealthCheck {
+    /// Overall health status
+    pub status: String,
+    /// Node ID
+    pub node_id: String,
+    /// Uptime in seconds
+    pub uptime_seconds: i64,
+    /// Storage health
+    pub storage: StorageHealth,
+    /// Network health
+    pub network: NetworkHealth,
+    /// Sync health
+    pub sync: SyncHealth,
+    /// Resilience health
+    pub resilience: ResilienceHealth,
+    /// TTL health
+    pub ttl: TtlHealth,
+    /// Timestamp of health check
+    pub timestamp: String,
+}
+
 #[derive(SimpleObject, Clone)]
 pub struct IotMessage {
     pub topic: String,
@@ -1452,6 +1578,154 @@ impl QueryRoot {
         }
     }
 
+    // ============ TTL (Time-To-Live) Queries ============
+
+    /// Get TTL information for a key
+    async fn get_ttl(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+    ) -> Result<TtlInfoGql, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_ttl"]).inc();
+        
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_ttl"]).inc();
+                DbError::StaticError(STORAGE_NOT_FOUND)
+            })?;
+
+        let full_key = format_key(&db_name, &key);
+        
+        match storage.get_ttl(&full_key).await {
+            Ok(Some(info)) => Ok(TtlInfoGql {
+                ttl_seconds: info.ttl_seconds.map(|t| t as i64),
+                expires_at: info.expires_at.map(|t| t.to_string()),
+                created_at: info.created_at.to_string(),
+                remaining_seconds: info.remaining_seconds.map(|t| t as i64),
+                has_ttl: info.has_ttl,
+                key_exists: true,
+            }),
+            Ok(None) => Ok(TtlInfoGql {
+                ttl_seconds: None,
+                expires_at: None,
+                created_at: "0".to_string(),
+                remaining_seconds: None,
+                has_ttl: false,
+                key_exists: false,
+            }),
+            Err(e) => {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_ttl"]).inc();
+                Err(DbError::StorageError(e.to_string()))
+            }
+        }
+    }
+
+    // ============ Health Check Queries ============
+
+    /// Get comprehensive health check for the node
+    async fn get_health(&self, ctx: &Context<'_>) -> Result<HealthCheck, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_health"]).inc();
+        
+        // Get endpoint for node ID
+        let node_id = if let Ok(endpoint) = ctx.data::<iroh::Endpoint>() {
+            endpoint.id().to_string()
+        } else {
+            "unknown".to_string()
+        };
+
+        // Get peer counts
+        let (connected_peers, discovered_peers) = if let Ok(peers_map) = ctx.data::<std::sync::Arc<dashmap::DashMap<iroh::EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>>() {
+            (peers_map.len() as i64, peers_map.len() as i64)
+        } else {
+            (0, 0)
+        };
+
+        // Calculate uptime
+        let uptime_seconds = get_start_time().elapsed().as_secs() as i64;
+
+        // Get metrics
+        let storage_reads = metrics::STORAGE_READS.get() as i64;
+        let storage_writes = metrics::STORAGE_WRITES.get() as i64;
+        let cache_hit_rate = metrics::cache_hit_rate();
+        let cache_size_hot = metrics::CACHE_SIZE_HOT.get();
+        let cache_size_warm = metrics::CACHE_SIZE_WARM.get();
+        
+        let bytes_sent = metrics::NETWORK_BYTES_SENT.get() as i64;
+        let bytes_received = metrics::NETWORK_BYTES_RECEIVED.get() as i64;
+        
+        let sync_operations = metrics::SYNC_OPERATIONS.get() as i64;
+        let sync_conflicts = metrics::SYNC_CONFLICTS.get() as i64;
+        let sync_merges = metrics::SYNC_MERGES.get() as i64;
+        
+        let circuit_breaker_trips = metrics::CIRCUIT_BREAKER_TRIPS.get() as i64;
+        let banned_peers = metrics::PEERS_BANNED.get();
+        
+        let ttl_keys = metrics::TTL_KEYS_TOTAL.get();
+        let ttl_expired = metrics::TTL_KEYS_EXPIRED.get() as i64;
+
+        // Build health components
+        let storage_healthy = storage_reads >= 0; // Basic check
+        let network_healthy = connected_peers > 0 || discovered_peers > 0;
+        let sync_healthy = true; // Sync system is operational if code runs
+        let resilience_healthy = circuit_breaker_trips < 100; // Arbitrary threshold
+        let ttl_healthy = true;
+
+        // Overall status
+        let status = if storage_healthy && network_healthy {
+            "healthy"
+        } else if network_healthy {
+            "degraded"
+        } else {
+            "unhealthy"
+        };
+
+        let timestamp = chrono::Utc::now().to_rfc3339();
+
+        Ok(HealthCheck {
+            status: status.to_string(),
+            node_id,
+            uptime_seconds,
+            storage: StorageHealth {
+                healthy: storage_healthy,
+                total_reads: storage_reads,
+                total_writes: storage_writes,
+                cache_hit_rate,
+                cache_size_hot,
+                cache_size_warm,
+            },
+            network: NetworkHealth {
+                healthy: network_healthy,
+                connected_peers,
+                discovered_peers,
+                bytes_sent,
+                bytes_received,
+            },
+            sync: SyncHealth {
+                healthy: sync_healthy,
+                total_operations: sync_operations,
+                conflicts_resolved: sync_conflicts,
+                total_merges: sync_merges,
+            },
+            resilience: ResilienceHealth {
+                healthy: resilience_healthy,
+                circuit_breaker_trips,
+                banned_peers,
+            },
+            ttl: TtlHealth {
+                healthy: ttl_healthy,
+                keys_with_ttl: ttl_keys,
+                keys_expired: ttl_expired,
+            },
+            timestamp,
+        })
+    }
+
     // ============ Node Information Queries ============
 
     /// Get node information including peer connections and health
@@ -2005,12 +2279,18 @@ impl MutationRoot {
         let ts_timestamp_clone = input.timestamp.clone();
         let longitude_clone = input.longitude;
         let latitude_clone = input.latitude;
+        
+        // Apply TTL based on user's plan tier
+        // TODO: Query smart contract to get user's plan based on public_key
+        // For now, all users are on free tier (24 hours)
+        const FREE_TIER_TTL: u64 = 86_400; // 24 hours
+        let ttl_seconds = Some(FREE_TIER_TTL);
 
         // Store data based on type
         match input.store_type.to_lowercase().as_str() {
             "string" => {
                 storage
-                    .set_string_with_metadata(&full_key, &input.value, sig_meta.clone())
+                    .set_string_with_ttl(&full_key, &input.value, sig_meta.clone(), ttl_seconds)
                     .await
                     .map_err(DbError::from)?;
             }
@@ -2019,19 +2299,19 @@ impl MutationRoot {
                     DbError::InvalidData("Field required for Hash type".to_string())
                 })?;
                 storage
-                    .set_hash_with_metadata(&full_key, &field, &input.value, sig_meta.clone())
+                    .set_hash_with_ttl(&full_key, &field, &input.value, sig_meta.clone(), ttl_seconds)
                     .await
                     .map_err(DbError::from)?;
             }
             "list" => {
                 storage
-                    .push_list_with_metadata(&full_key, &input.value, sig_meta.clone())
+                    .push_list_with_ttl(&full_key, &input.value, sig_meta.clone(), ttl_seconds)
                     .await
                     .map_err(DbError::from)?;
             }
             "set" => {
                 storage
-                    .add_set_with_metadata(&full_key, &input.value, sig_meta.clone())
+                    .add_set_with_ttl(&full_key, &input.value, sig_meta.clone(), ttl_seconds)
                     .await
                     .map_err(DbError::from)?;
             }
@@ -2040,14 +2320,14 @@ impl MutationRoot {
                     DbError::InvalidData("Score required for SortedSet type".to_string())
                 })?;
                 storage
-                    .add_sorted_set_with_metadata(&full_key, score, &input.value, sig_meta.clone())
+                    .add_sorted_set_with_ttl(&full_key, score, &input.value, sig_meta.clone(), ttl_seconds)
                     .await
                     .map_err(DbError::from)?;
             }
             "json" => {
                 let path = input.json_path.as_deref().unwrap_or("$");
                 storage
-                    .set_json_with_metadata(&full_key, path, &input.value, sig_meta.clone())
+                    .set_json_with_ttl(&full_key, path, &input.value, sig_meta.clone(), ttl_seconds)
                     .await
                     .map_err(DbError::from)?;
             }
@@ -2078,7 +2358,7 @@ impl MutationRoot {
                 }
 
                 storage
-                    .xadd_with_metadata(&full_key, "*", &owned_fields, sig_meta.clone())
+                    .xadd_with_ttl(&full_key, "*", &owned_fields, sig_meta.clone(), ttl_seconds)
                     .await
                     .map_err(DbError::from)?;
             }
@@ -2094,7 +2374,7 @@ impl MutationRoot {
                 })?;
 
                 storage
-                    .ts_add_with_metadata(&full_key, timestamp, value, sig_meta.clone())
+                    .ts_add_with_ttl(&full_key, timestamp, value, sig_meta.clone(), ttl_seconds)
                     .await
                     .map_err(DbError::from)?;
             }
@@ -2107,7 +2387,7 @@ impl MutationRoot {
                 })?;
 
                 storage
-                    .geoadd_with_metadata(&full_key, longitude, latitude, &input.value, sig_meta.clone())
+                    .geoadd_with_ttl(&full_key, longitude, latitude, &input.value, sig_meta.clone(), ttl_seconds)
                     .await
                     .map_err(DbError::from)?;
             }
@@ -2249,6 +2529,89 @@ impl MutationRoot {
             cid: Some(cid.clone()),
             message: format!("CID unpinned: {}", cid),
         })
+    }
+
+    // ============ TTL (Time-To-Live) Mutations ============
+
+    /// Set expiration time (TTL) for an existing key (like Redis EXPIRE)
+    async fn expire_key(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+        ttl_seconds: i32,
+    ) -> Result<TtlResult, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["expire_key"]).inc();
+        
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["expire_key"]).inc();
+                DbError::StaticError(STORAGE_NOT_FOUND)
+            })?;
+
+        let full_key = format_key(&db_name, &key);
+        
+        if ttl_seconds <= 0 {
+            return Err(DbError::InvalidData("TTL must be positive".to_string()));
+        }
+        
+        match storage.set_key_ttl(&full_key, ttl_seconds as u64).await {
+            Ok(true) => Ok(TtlResult {
+                success: true,
+                key: full_key,
+                message: format!("TTL set to {} seconds", ttl_seconds),
+            }),
+            Ok(false) => Ok(TtlResult {
+                success: false,
+                key: full_key,
+                message: "Key does not exist".to_string(),
+            }),
+            Err(e) => {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["expire_key"]).inc();
+                Err(DbError::StorageError(e.to_string()))
+            }
+        }
+    }
+
+    /// Remove TTL from a key, making it persistent (like Redis PERSIST)
+    async fn persist_key(
+        &self,
+        ctx: &Context<'_>,
+        db_name: String,
+        key: String,
+    ) -> Result<TtlResult, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["persist_key"]).inc();
+        
+        let storage = ctx
+            .data::<RedisStorage>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["persist_key"]).inc();
+                DbError::StaticError(STORAGE_NOT_FOUND)
+            })?;
+
+        let full_key = format_key(&db_name, &key);
+        
+        match storage.persist_key(&full_key).await {
+            Ok(true) => Ok(TtlResult {
+                success: true,
+                key: full_key,
+                message: "TTL removed, key is now persistent".to_string(),
+            }),
+            Ok(false) => Ok(TtlResult {
+                success: false,
+                key: full_key,
+                message: "Key does not exist".to_string(),
+            }),
+            Err(e) => {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["persist_key"]).inc();
+                Err(DbError::StorageError(e.to_string()))
+            }
+        }
     }
 
     // ============ IoT Mutations ============
