@@ -353,7 +353,10 @@ impl IrohNetwork {
         // Track the discovered peer (no address since we used EndpointId-only connection)
         self.discovered_peers.insert(peer_id, (chrono::Utc::now(), None));
         
-        // Keep connection alive by storing it (optional)
+        // Note: The connection is managed by iroh internally.
+        // For gossip protocol, the connection stays alive as long as there are active streams.
+        // Dropping the Connection handle here is fine - iroh keeps the underlying QUIC connection
+        // alive based on the protocol's needs (gossip keeps it alive for message exchange).
         drop(conn);
         
         Ok(())
@@ -391,7 +394,8 @@ impl IrohNetwork {
         let mut all_peers: Vec<String> = vec![HARDCODED_BOOTSTRAP.to_string()];
         all_peers.extend(peer_strings.iter().cloned());
         
-        // Spawn connection attempts in parallel to speed up bootstrap
+        // Track which peers we actually spawn connection tasks for (to match results correctly)
+        let mut spawned_peers: Vec<(EndpointId, SocketAddr)> = Vec::new();
         let mut connection_tasks = Vec::new();
         
         for peer_str in &all_peers {
@@ -414,6 +418,9 @@ impl IrohNetwork {
                         
                         match socket_addr_str.parse::<SocketAddr>() {
                             Ok(socket_addr) => {
+                                // Track this peer so we can match results correctly
+                                spawned_peers.push((node_id, socket_addr));
+                                
                                 // Clone endpoint for use in async task
                                 let endpoint = self.endpoint.clone();
                                 
@@ -444,24 +451,16 @@ impl IrohNetwork {
         let results = futures::future::join_all(connection_tasks).await;
         
         // Collect successfully connected peers for monitoring
+        // Now spawned_peers and results are correctly aligned
         let mut connected_bootstrap_peers = Vec::new();
-        for (peer_str, result) in all_peers.iter().zip(results.iter()) {
+        for ((node_id, socket_addr), result) in spawned_peers.iter().zip(results.iter()) {
             if let Ok(Ok(())) = result {
-                if let Some(at_idx) = peer_str.find('@') {
-                    let node_id_str = &peer_str[..at_idx];
-                    let socket_addr_str = &peer_str[at_idx + 1..];
-                    if let (Ok(node_id), Ok(socket_addr)) = (
-                        node_id_str.parse::<EndpointId>(),
-                        socket_addr_str.parse::<std::net::SocketAddr>()
-                    ) {
-                        connected_bootstrap_peers.push((node_id, socket_addr));
-                        
-                        // CRITICAL: Add bootstrap peer to discovered_peers so it gets broadcasted!
-                        // This allows other nodes to discover and connect to the bootstrap peer
-                        self.discovered_peers.insert(node_id, (chrono::Utc::now(), Some(socket_addr)));
-                        tracing::debug!("Added bootstrap peer {} ({}) to discovered peers", node_id.fmt_short(), socket_addr);
-                    }
-                }
+                connected_bootstrap_peers.push((*node_id, *socket_addr));
+                
+                // CRITICAL: Add bootstrap peer to discovered_peers so it gets broadcasted!
+                // This allows other nodes to discover and connect to the bootstrap peer
+                self.discovered_peers.insert(*node_id, (chrono::Utc::now(), Some(*socket_addr)));
+                tracing::debug!("Added bootstrap peer {} ({}) to discovered peers", node_id.fmt_short(), socket_addr);
             }
         }
         
