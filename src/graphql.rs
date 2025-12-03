@@ -1803,6 +1803,9 @@ impl QueryRoot {
             .data::<std::sync::Arc<dashmap::DashMap<iroh::EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>>()
             .map_err(|_| DbError::InternalError("Discovered peers map not found".to_string()))?;
 
+        // Try to get the endpoint to retrieve connection type information
+        let endpoint = ctx.data::<iroh::Endpoint>().ok();
+
         let peers: Vec<(iroh::EndpointId, chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)> = peers_map
             .iter()
             .map(|entry| (*entry.key(), entry.value().0, entry.value().1))
@@ -1810,11 +1813,42 @@ impl QueryRoot {
 
         Ok(peers
             .into_iter()
-            .map(|(node_id, last_seen, addr)| PeerInfo {
-                peer_id: node_id.to_string(),
-                last_seen: last_seen.to_rfc3339(),
-                connection_status: "discovered".to_string(),
-                address: addr.map(|a| a.to_string()),
+            .map(|(node_id, last_seen, stored_addr)| {
+                // Try to get address from stored value first, then from endpoint conn_type
+                let address = stored_addr
+                    .map(|a| a.to_string())
+                    .or_else(|| {
+                        // Try to get address from endpoint's connection type
+                        endpoint.and_then(|ep| {
+                            ep.conn_type(node_id).and_then(|mut conn_type_watcher| {
+                                use iroh::Watcher;
+                                let conn_type = conn_type_watcher.get();
+                                match conn_type {
+                                    iroh::endpoint::ConnectionType::Direct(addr) => Some(addr.to_string()),
+                                    iroh::endpoint::ConnectionType::Mixed(addr, _) => Some(addr.to_string()),
+                                    _ => None,
+                                }
+                            })
+                        })
+                    });
+                
+                // Determine connection status based on whether we have a connection type
+                let connection_status = if let Some(ep) = endpoint {
+                    if ep.conn_type(node_id).is_some() {
+                        "connected".to_string()
+                    } else {
+                        "discovered".to_string()
+                    }
+                } else {
+                    "discovered".to_string()
+                };
+
+                PeerInfo {
+                    peer_id: node_id.to_string(),
+                    last_seen: last_seen.to_rfc3339(),
+                    connection_status,
+                    address,
+                }
             })
             .collect())
     }
