@@ -385,6 +385,7 @@ pub struct PeerInfo {
     pub peer_id: String,
     pub connection_status: String,
     pub last_seen: String,
+    pub address: Option<String>,
 }
 
 /// Detailed peer information from the PeerRegistry
@@ -1809,10 +1810,11 @@ impl QueryRoot {
 
         Ok(peers
             .into_iter()
-            .map(|(node_id, last_seen, _addr)| PeerInfo {
+            .map(|(node_id, last_seen, addr)| PeerInfo {
                 peer_id: node_id.to_string(),
                 last_seen: last_seen.to_rfc3339(),
-                connection_status: "connected".to_string(),
+                connection_status: "discovered".to_string(),
+                address: addr.map(|a| a.to_string()),
             })
             .collect())
     }
