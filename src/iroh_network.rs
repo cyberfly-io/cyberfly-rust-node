@@ -500,89 +500,75 @@ impl IrohNetwork {
         discovered_peers: Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>,
     ) {
         const CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds
-        const RECONNECT_DELAY_SECS: u64 = 5; // Wait 5 seconds before reconnecting
-        const KEEP_ALIVE_INTERVAL_SECS: u64 = 60; // Refresh bootstrap peers in discovered_peers every 60s
+        const RECONNECT_DELAY_SECS: u64 = 3; // Wait 3 seconds before reconnecting
         
-        tracing::info!("🔍 Started bootstrap connection monitor (checks every {}s, keep-alive every {}s)", 
-            CHECK_INTERVAL_SECS, KEEP_ALIVE_INTERVAL_SECS);
+        tracing::info!("🔍 Started bootstrap connection monitor (checks every {}s) - reconnects only when isolated", 
+            CHECK_INTERVAL_SECS);
         
         let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(CHECK_INTERVAL_SECS));
-        let mut keep_alive_interval = tokio::time::interval(std::time::Duration::from_secs(KEEP_ALIVE_INTERVAL_SECS));
         
         loop {
-            tokio::select! {
-                _ = check_interval.tick() => {
-                    for (node_id, socket_addr) in &bootstrap_peers {
-                        // Check if we still have an active connection to this peer
-                        let conn_watcher = endpoint.conn_type(*node_id);
-                        
-                        let is_connected = if let Some(mut watcher) = conn_watcher {
-                            use iroh::endpoint::ConnectionType;
-                            !matches!(watcher.get(), ConnectionType::None)
-                        } else {
-                            false
-                        };
-                        
-                        if !is_connected {
-                            tracing::warn!(
-                                "⚠️  Bootstrap peer {} at {} disconnected - attempting reconnection",
-                                node_id.fmt_short(),
-                                socket_addr
+            check_interval.tick().await;
+            
+            // Check if we have ANY connected peers (not isolated)
+            let has_any_connection = discovered_peers.len() > 0 || {
+                // Also check if any bootstrap peer is connected
+                bootstrap_peers.iter().any(|(node_id, _)| {
+                    if let Some(mut watcher) = endpoint.conn_type(*node_id) {
+                        use iroh::endpoint::ConnectionType;
+                        !matches!(watcher.get(), ConnectionType::None)
+                    } else {
+                        false
+                    }
+                })
+            };
+            
+            if has_any_connection {
+                // Not isolated - just update bootstrap peers in discovered_peers
+                let now = chrono::Utc::now();
+                for (node_id, socket_addr) in &bootstrap_peers {
+                    discovered_peers.insert(*node_id, (now, Some(*socket_addr)));
+                }
+                tracing::trace!("✓ Node has connections, skipping bootstrap reconnect");
+                continue;
+            }
+            
+            // Node is ISOLATED - reconnect to all bootstrap peers
+            tracing::warn!("⚠️  Node is ISOLATED (no peers) - reconnecting to bootstrap nodes");
+            
+            for (node_id, socket_addr) in &bootstrap_peers {
+                tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+                
+                let endpoint_clone = endpoint.clone();
+                let node_id_clone = *node_id;
+                let socket_addr_clone = *socket_addr;
+                let discovered_peers_clone = Arc::clone(&discovered_peers);
+                
+                tokio::spawn(async move {
+                    match Self::connect_bootstrap_peer_with_retry(
+                        endpoint_clone,
+                        node_id_clone,
+                        socket_addr_clone,
+                    ).await {
+                        Ok(_) => {
+                            tracing::info!(
+                                "✅ Reconnected to bootstrap peer {}",
+                                node_id_clone.fmt_short()
                             );
-                            
-                            tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
-                            
-                            let endpoint_clone = endpoint.clone();
-                            let node_id_clone = *node_id;
-                            let socket_addr_clone = *socket_addr;
-                            let discovered_peers_clone = Arc::clone(&discovered_peers);
-                            
-                            tokio::spawn(async move {
-                                match Self::connect_bootstrap_peer_with_retry(
-                                    endpoint_clone,
-                                    node_id_clone,
-                                    socket_addr_clone,
-                                ).await {
-                                    Ok(_) => {
-                                        tracing::info!(
-                                            "✅ Successfully reconnected to bootstrap peer {} at {}",
-                                            node_id_clone.fmt_short(),
-                                            socket_addr_clone
-                                        );
-                                        // Update discovered_peers with fresh timestamp
-                                        discovered_peers_clone.insert(
-                                            node_id_clone, 
-                                            (chrono::Utc::now(), Some(socket_addr_clone))
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "❌ Failed to reconnect to bootstrap peer {} at {}: {}",
-                                            node_id_clone.fmt_short(),
-                                            socket_addr_clone,
-                                            e
-                                        );
-                                    }
-                                }
-                            });
-                        } else {
-                            tracing::trace!(
-                                "✓ Bootstrap peer {} at {} still connected",
-                                node_id.fmt_short(),
-                                socket_addr
+                            discovered_peers_clone.insert(
+                                node_id_clone, 
+                                (chrono::Utc::now(), Some(socket_addr_clone))
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "❌ Failed to reconnect to bootstrap peer {}: {}",
+                                node_id_clone.fmt_short(),
+                                e
                             );
                         }
                     }
-                }
-                
-                // Periodically refresh bootstrap peers in discovered_peers to prevent isolation
-                _ = keep_alive_interval.tick() => {
-                    let now = chrono::Utc::now();
-                    for (node_id, socket_addr) in &bootstrap_peers {
-                        discovered_peers.insert(*node_id, (now, Some(*socket_addr)));
-                    }
-                    tracing::debug!("💓 Keep-alive: refreshed {} bootstrap peer(s) in discovered_peers", bootstrap_peers.len());
-                }
+                });
             }
         }
     }
@@ -864,54 +850,9 @@ impl IrohNetwork {
         });
         tracing::info!("🌐 Started peer discovery protocol with cryptographic signatures (broadcasts every 10s)");
 
-        // Start peer expiration cleanup task - removes inactive peers periodically
-        // IMPORTANT: Bootstrap peers are excluded from expiration to prevent isolation
-        let cleanup_discovered_peers = Arc::clone(&self.discovered_peers);
-        let bootstrap_peer_ids: std::collections::HashSet<EndpointId> = self.bootstrap_peers.iter().cloned().collect();
-        let expiration_timeout = std::time::Duration::from_secs(300); // 5 minute timeout (was 30s - too aggressive)
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60)); // Check every 60s instead of 10s
-            loop {
-                interval.tick().await;
-                
-                let now = chrono::Utc::now();
-                let mut expired_count = 0;
-                
-                // Collect expired peers (excluding bootstrap peers)
-                let expired_peers: Vec<EndpointId> = cleanup_discovered_peers
-                    .iter()
-                    .filter_map(|entry| {
-                        let peer_id = *entry.key();
-                        
-                        // NEVER expire bootstrap peers - they're our lifeline to the network
-                        if bootstrap_peer_ids.contains(&peer_id) {
-                            return None;
-                        }
-                        
-                        let (last_seen, _addr) = entry.value();
-                        let duration_since = now.signed_duration_since(*last_seen);
-                        
-                        if duration_since.num_seconds() > expiration_timeout.as_secs() as i64 {
-                            Some(*entry.key())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                
-                // Remove expired peers
-                for peer_id in expired_peers {
-                    cleanup_discovered_peers.remove(&peer_id);
-                    expired_count += 1;
-                    tracing::info!("🕒 Removed expired peer: {}", peer_id);
-                }
-                
-                if expired_count > 0 {
-                    tracing::info!("🧹 Cleaned up {} expired peer(s)", expired_count);
-                }
-            }
-        });
-        tracing::info!("🧹 Started peer expiration cleanup (checks every 60s, timeout: 5min, bootstrap peers excluded)");
+        // NOTE: Peer expiration is DISABLED - peers are never removed automatically
+        // Bootstrap connection monitor handles reconnection to maintain network connectivity
+        tracing::info!("✓ Peer expiration disabled - peers persist until node restart");
 
         // Start a peer discovery broadcast task (only after successful gossip join)
         // This helps peers find each other by periodically sending discovery beacons
