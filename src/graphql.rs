@@ -2798,54 +2798,60 @@ impl MutationRoot {
             .parse::<iroh::EndpointId>()
             .map_err(|e| DbError::InternalError(format!("Invalid peer ID format: {}", e)))?;
 
-        // Get the endpoint for connection status check and direct connection attempts
+        // Get the endpoint for connection attempts
         let endpoint = ctx
             .data::<iroh::Endpoint>()
             .map_err(|_| DbError::InternalError("Endpoint not found".to_string()))?;
 
-        // Check if peer is actually connected by checking conn_type (not just in discovered_peers map)
-        if let Some(mut conn_type_watcher) = endpoint.conn_type(endpoint_id) {
-            use iroh::Watcher;
-            let conn_type = conn_type_watcher.get();
-            // If we have an active connection type (not None), peer is connected
-            if !matches!(conn_type, iroh::endpoint::ConnectionType::None) {
-                return Ok(StorageResult {
-                    success: true,
-                    message: format!(
-                        "Peer {} is already connected via {} connection.",
-                        peer_id, conn_type
-                    ),
-                });
-            }
-        }
-
         // Use gossip ALPN protocol for peer connections
         let alpn = iroh_gossip::ALPN;
 
-        // Attempt to connect to the peer using the endpoint directly
+        // Always attempt to connect - this will verify if peer is actually reachable
+        // Don't rely on cached conn_type as it may be stale
         tracing::info!("GraphQL: Attempting to dial peer via gossip ALPN: {}", peer_id);
         
-        let conn = endpoint
-            .connect(endpoint_id, alpn)
-            .await
-            .map_err(|e| {
-                // Remove stale entry from discovered_peers if connection fails
-                discovered_peers.remove(&endpoint_id);
-                DbError::InternalError(format!("Failed to connect to peer: {}", e))
-            })?;
-        
-        tracing::info!("GraphQL: Successfully connected to peer: {}", peer_id);
-        
-        // Track the peer in discovered_peers (address unknown in this context)
-        discovered_peers.insert(endpoint_id, (chrono::Utc::now(), None));
-        
-        // Keep connection open briefly, then close
-        drop(conn);
+        // Use a timeout to avoid waiting too long for unreachable peers
+        let connect_result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            endpoint.connect(endpoint_id, alpn)
+        ).await;
 
-        Ok(StorageResult {
-            success: true,
-            message: format!("Successfully connected to peer via gossip: {}", peer_id),
-        })
+        match connect_result {
+            Ok(Ok(conn)) => {
+                // Get the actual remote address from the connection if possible
+                let conn_type_str = if let Some(mut watcher) = endpoint.conn_type(endpoint_id) {
+                    use iroh::Watcher;
+                    format!("{}", watcher.get())
+                } else {
+                    "unknown".to_string()
+                };
+
+                tracing::info!("GraphQL: Successfully connected to peer: {} via {}", peer_id, conn_type_str);
+                
+                // Track the peer in discovered_peers
+                discovered_peers.insert(endpoint_id, (chrono::Utc::now(), None));
+                
+                // Keep connection reference briefly
+                drop(conn);
+
+                Ok(StorageResult {
+                    success: true,
+                    message: format!("Successfully connected to peer {} via {}", peer_id, conn_type_str),
+                })
+            }
+            Ok(Err(e)) => {
+                // Connection failed - peer is not reachable
+                tracing::warn!("GraphQL: Failed to connect to peer {}: {}", peer_id, e);
+                discovered_peers.remove(&endpoint_id);
+                Err(DbError::InternalError(format!("Failed to connect to peer: {}", e)))
+            }
+            Err(_) => {
+                // Timeout - peer is not responding
+                tracing::warn!("GraphQL: Connection to peer {} timed out", peer_id);
+                discovered_peers.remove(&endpoint_id);
+                Err(DbError::InternalError(format!("Connection to peer {} timed out after 10 seconds", peer_id)))
+            }
+        }
     }
 }
 
