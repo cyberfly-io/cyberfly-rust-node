@@ -1814,33 +1814,38 @@ impl QueryRoot {
         Ok(peers
             .into_iter()
             .map(|(node_id, last_seen, stored_addr)| {
-                // Try to get address from stored value first, then from endpoint conn_type
+                // Get connection type info from endpoint
+                let (conn_type_info, is_connected) = if let Some(ep) = endpoint {
+                    if let Some(mut conn_type_watcher) = ep.conn_type(node_id) {
+                        use iroh::Watcher;
+                        let conn_type = conn_type_watcher.get();
+                        let connected = !matches!(conn_type, iroh::endpoint::ConnectionType::None);
+                        (Some(conn_type), connected)
+                    } else {
+                        (None, false)
+                    }
+                } else {
+                    (None, false)
+                };
+
+                // Try to get address from stored value first, then from connection type
                 let address = stored_addr
                     .map(|a| a.to_string())
                     .or_else(|| {
-                        // Try to get address from endpoint's connection type
-                        endpoint.and_then(|ep| {
-                            ep.conn_type(node_id).and_then(|mut conn_type_watcher| {
-                                use iroh::Watcher;
-                                let conn_type = conn_type_watcher.get();
-                                match conn_type {
-                                    iroh::endpoint::ConnectionType::Direct(addr) => Some(addr.to_string()),
-                                    iroh::endpoint::ConnectionType::Mixed(addr, _) => Some(addr.to_string()),
-                                    _ => None,
-                                }
-                            })
+                        conn_type_info.and_then(|conn_type| {
+                            match conn_type {
+                                iroh::endpoint::ConnectionType::Direct(addr) => Some(addr.to_string()),
+                                iroh::endpoint::ConnectionType::Mixed(addr, _) => Some(addr.to_string()),
+                                _ => None,
+                            }
                         })
                     });
                 
-                // Determine connection status based on whether we have a connection type
-                let connection_status = if let Some(ep) = endpoint {
-                    if ep.conn_type(node_id).is_some() {
-                        "connected".to_string()
-                    } else {
-                        "discovered".to_string()
-                    }
+                // Connection status based on actual connection type
+                let connection_status = if is_connected {
+                    "connected".to_string()
                 } else {
-                    "discovered".to_string()
+                    "disconnected".to_string()
                 };
 
                 PeerInfo {
@@ -2783,7 +2788,7 @@ impl MutationRoot {
         ctx: &Context<'_>,
         peer_id: String,
     ) -> Result<StorageResult, DbError> {
-        // Get the discovered peers map to check if peer is already connected
+        // Get the discovered peers map
         let discovered_peers = ctx
             .data::<Arc<dashmap::DashMap<iroh::EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>>()
             .map_err(|_| DbError::InternalError("Discovered peers map not found".to_string()))?;
@@ -2793,21 +2798,26 @@ impl MutationRoot {
             .parse::<iroh::EndpointId>()
             .map_err(|e| DbError::InternalError(format!("Invalid peer ID format: {}", e)))?;
 
-        // Check if peer is already discovered via gossip
-        if discovered_peers.contains_key(&endpoint_id) {
-            return Ok(StorageResult {
-                success: true,
-                message: format!(
-                    "Peer {} is already connected via gossip network.",
-                    peer_id
-                ),
-            });
-        }
-
-        // Get the endpoint for direct connection attempts
+        // Get the endpoint for connection status check and direct connection attempts
         let endpoint = ctx
             .data::<iroh::Endpoint>()
             .map_err(|_| DbError::InternalError("Endpoint not found".to_string()))?;
+
+        // Check if peer is actually connected by checking conn_type (not just in discovered_peers map)
+        if let Some(mut conn_type_watcher) = endpoint.conn_type(endpoint_id) {
+            use iroh::Watcher;
+            let conn_type = conn_type_watcher.get();
+            // If we have an active connection type (not None), peer is connected
+            if !matches!(conn_type, iroh::endpoint::ConnectionType::None) {
+                return Ok(StorageResult {
+                    success: true,
+                    message: format!(
+                        "Peer {} is already connected via {} connection.",
+                        peer_id, conn_type
+                    ),
+                });
+            }
+        }
 
         // Use gossip ALPN protocol for peer connections
         let alpn = iroh_gossip::ALPN;
@@ -2819,6 +2829,8 @@ impl MutationRoot {
             .connect(endpoint_id, alpn)
             .await
             .map_err(|e| {
+                // Remove stale entry from discovered_peers if connection fails
+                discovered_peers.remove(&endpoint_id);
                 DbError::InternalError(format!("Failed to connect to peer: {}", e))
             })?;
         
