@@ -4,8 +4,28 @@ use rust_pact::LocalOptions;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
+
+/// Safe wrapper for rust_pact fetch calls that may panic on network errors
+/// Returns Result instead of panicking
+fn safe_pact_call<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T + std::panic::UnwindSafe,
+{
+    catch_unwind(f)
+        .map_err(|panic_info| {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic in Kadena API call".to_string()
+            };
+            anyhow!("Kadena API call failed: {}", msg)
+        })
+}
 
 /// Response from ip-api.com
 #[derive(Debug, Deserialize)]
@@ -156,8 +176,10 @@ impl NodeRegistry {
         };
         
         let response = tokio::task::spawn_blocking(move || {
-            rust_pact::fetch::local_with_opts(&cmd, &api_host, Some(options))
-        }).await?;
+            safe_pact_call(AssertUnwindSafe(|| {
+                rust_pact::fetch::local_with_opts(&cmd, &api_host, Some(options))
+            }))
+        }).await??;
 
         info!("Full response from get-node: {:?}", response);
 
@@ -248,8 +270,10 @@ impl NodeRegistry {
         let api_host = self.config.api_host.clone();
         let cmd_clone = cmd.clone();
         let response = tokio::task::spawn_blocking(move || {
-            rust_pact::fetch::local(&cmd_clone, &api_host)
-        }).await?;
+            safe_pact_call(AssertUnwindSafe(|| {
+                rust_pact::fetch::local(&cmd_clone, &api_host)
+            }))
+        }).await??;
 
         if let Some(result) = response.get("result") {
             if result.get("status") != Some(&json!("success")) {
@@ -266,8 +290,10 @@ impl NodeRegistry {
         // Submit the transaction
         let api_host = self.config.api_host.clone();
         let response = tokio::task::spawn_blocking(move || {
-            rust_pact::fetch::send(&cmd, &api_host, false)
-        }).await?;
+            safe_pact_call(AssertUnwindSafe(|| {
+                rust_pact::fetch::send(&cmd, &api_host, false)
+            }))
+        }).await??;
 
         if let Some(request_keys) = response.get("requestKeys").and_then(|k| k.as_array()) {
             if let Some(request_key) = request_keys.first().and_then(|k| k.as_str()) {
@@ -324,8 +350,10 @@ impl NodeRegistry {
 
         let api_host = self.config.api_host.clone();
         let response = tokio::task::spawn_blocking(move || {
-            rust_pact::fetch::send(&cmd, &api_host, false)
-        }).await?;
+            safe_pact_call(AssertUnwindSafe(|| {
+                rust_pact::fetch::send(&cmd, &api_host, false)
+            }))
+        }).await??;
 
         if let Some(request_keys) = response.get("requestKeys").and_then(|k| k.as_array()) {
             if let Some(request_key) = request_keys.first().and_then(|k| k.as_str()) {
@@ -368,8 +396,10 @@ impl NodeRegistry {
         };
         
         let response = tokio::task::spawn_blocking(move || {
-            rust_pact::fetch::local_with_opts(&cmd, &api_host, Some(options))
-        }).await?;
+            safe_pact_call(AssertUnwindSafe(|| {
+                rust_pact::fetch::local_with_opts(&cmd, &api_host, Some(options))
+            }))
+        }).await??;
 
         if let Some(result) = response.get("result") {
             if result.get("status") == Some(&json!("success")) {
@@ -431,8 +461,10 @@ impl NodeRegistry {
 
         let api_host = self.config.api_host.clone();
         let response = tokio::task::spawn_blocking(move || {
-            rust_pact::fetch::send(&cmd, &api_host, false)
-        }).await?;
+            safe_pact_call(AssertUnwindSafe(|| {
+                rust_pact::fetch::send(&cmd, &api_host, false)
+            }))
+        }).await??;
 
         if let Some(request_keys) = response.get("requestKeys").and_then(|k| k.as_array()) {
             if let Some(request_key) = request_keys.first().and_then(|k| k.as_str()) {
@@ -458,8 +490,10 @@ impl NodeRegistry {
             let api_host = self.config.api_host.clone();
             let poll_cmd_clone = poll_cmd.clone();
             let response = tokio::task::spawn_blocking(move || {
-                rust_pact::fetch::poll(&poll_cmd_clone, &api_host)
-            }).await?;
+                safe_pact_call(AssertUnwindSafe(|| {
+                    rust_pact::fetch::poll(&poll_cmd_clone, &api_host)
+                }))
+            }).await??;
 
             if let Some(results) = response.as_object() {
                 if let Some(result) = results.get(request_key) {
