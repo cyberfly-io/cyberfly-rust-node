@@ -28,6 +28,7 @@ use iroh::discovery::pkarr::dht::DhtDiscovery;
 // Arc used in places during runtime; prefix to avoid unused import warning in some builds
 #[allow(unused_imports)]
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Start the Iroh Relay Server
 async fn start_relay_server(_endpoint: iroh::Endpoint, bind_addr: String) -> Result<()> {
@@ -579,19 +580,56 @@ async fn main() -> Result<()> {
     .await?;
     tracing::info!("GraphQL server initialized with WebSocket subscription support");
 
-    // Start network event loop
-    // Attach sync outbound receiver so GraphQL can submit SyncMessage to be broadcast
+    // Start network event loop on a dedicated Tokio runtime thread.
+    // This prevents heavy peer churn / gossip processing from starving the HTTP server.
+    // Attach sync outbound receiver so GraphQL can submit SyncMessage to be broadcast.
     network.set_sync_outbound_rx(sync_out_rx);
-    
-    // Move network into its own task - no mutex needed since it's single-owner
+
+    std::thread::Builder::new()
+        .name("iroh-network".to_string())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("iroh-net-worker")
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("Failed to build iroh network runtime: {e}");
+                    return;
+                }
+            };
+
+            rt.block_on(async move {
+                let mut net = network;
+                loop {
+                    if let Err(e) = net.run().await {
+                        tracing::error!("Network error: {}", e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    }
+                }
+            });
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to spawn iroh network thread: {e}"))?;
+
+    // Scheduler-lag watchdog for the API runtime.
+    // If the runtime is being starved, this will log the observed lag.
     tokio::spawn(async move {
-        let mut net = network;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        let mut last = Instant::now();
         loop {
-            if let Err(e) = net.run().await {
-                tracing::error!("Network error: {}", e);
-                // Brief pause before retry
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            interval.tick().await;
+            let now = Instant::now();
+            let elapsed = now.saturating_duration_since(last);
+            // Expected is ~1s; log only if we're badly delayed.
+            if elapsed > std::time::Duration::from_secs(3) {
+                tracing::warn!(
+                    "API runtime lag detected: tick delay = {:?}",
+                    elapsed
+                );
             }
+            last = now;
         }
     });
 
