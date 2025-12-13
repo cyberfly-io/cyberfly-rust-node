@@ -3,9 +3,15 @@ name = "cyberfly-rust-node"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+jemalloc = ["tikv-jemallocator"]
+
 [dependencies]
+# Memory allocator - jemalloc significantly improves perf for multi-threaded workloads
+tikv-jemallocator = { version = "0.6", optional = true }
 # Async runtime (optimized features only)
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "fs", "time", "sync", "signal"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "fs", "time", "sync", "signal", "parking_lot"] }
 tokio-stream = "0.1"
 futures = "0.3"
 
@@ -114,11 +120,17 @@ debug = false
 [profile.release]
 # Full optimization for production - maximum performance
 opt-level = 3          # Maximum optimization
-lto = "fat"            # Full LTO for maximum performance
+lto = "thin"           # Thin LTO - much faster builds, nearly same perf as fat
 codegen-units = 1      # Single codegen unit for best optimization
 strip = true           # Strip symbols to reduce binary size
 panic = "abort"        # Smaller binary, faster panic handling
 debug = false          # No debug info in release
+
+[profile.release-fast]
+# Faster release builds for CI (still optimized, but faster to compile)
+inherits = "release"
+lto = "thin"
+codegen-units = 16     # More parallelism, slightly less optimization
 
 # Optional: Use faster linker (requires mold/lld installation)
 # Uncomment after installing: brew install mold (macOS) or cargo install mold (cross-platform)

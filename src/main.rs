@@ -17,6 +17,11 @@ mod retry; // Enhanced retry and circuit breaker mechanisms
 mod storage;
 mod sync; // Data synchronization with CRDT
 
+// Use jemalloc on Linux for better multi-threaded allocation performance
+#[cfg(all(target_os = "linux", feature = "jemalloc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use anyhow::Result;
 use axum::{routing::get, Router};
 use iroh::discovery::pkarr::dht::DhtDiscovery;
@@ -76,6 +81,9 @@ async fn main() -> Result<()> {
             }),
         )
         .init();
+
+    #[cfg(all(target_os = "linux", feature = "jemalloc"))]
+    tracing::info!("Using jemalloc allocator for improved performance");
 
     tracing::info!("Starting decentralized database node...");
 

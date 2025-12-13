@@ -59,7 +59,9 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
       - name: Build for ${{ matrix.target }}
-        run: cargo build --release --target ${{ matrix.target }} -j$(nproc)
+        run: |
+          # Enable jemalloc on Linux for better runtime performance
+          cargo build --release --target ${{ matrix.target }} --features jemalloc -j$(nproc)
 
       - name: Strip binary
         run: |
