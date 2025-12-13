@@ -19,7 +19,8 @@ env:
 jobs:
   build-rust-binaries:
     runs-on: ubuntu-latest
-    # Run directly on runner (not in container) for better caching
+    # Build inside debian:bookworm container to match runtime GLIBC version
+    container: debian:bookworm
     strategy:
       matrix:
         include:
@@ -34,19 +35,21 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential perl make gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config libssl-dev
+          apt-get update
+          apt-get install -y build-essential perl make curl gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config libssl-dev
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          . "$HOME/.cargo/env"
+          rustup target add ${{ matrix.target }}
 
       # Rust caching - includes Cargo.lock hash automatically
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.target }}
+          shared-key: ${{ matrix.target }}-bookworm
           cache-on-failure: true
           # Cache the target directory for this specific target
           cache-targets: true
@@ -60,6 +63,7 @@ jobs:
 
       - name: Build for ${{ matrix.target }}
         run: |
+          . "$HOME/.cargo/env"
           # Enable jemalloc on Linux for better runtime performance
           cargo build --release --target ${{ matrix.target }} --features jemalloc -j$(nproc)
 
