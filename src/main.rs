@@ -70,14 +70,20 @@ async fn metrics_handler() -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging with filters
-    // Filter out noisy Iroh protocol warnings about unsupported protocols
-    // (these occur when incompatible clients try to connect)
+    // Filter out noisy Iroh warnings that don't indicate real problems:
+    // - AEAD errors: crypto mismatch with incompatible peers (normal in heterogeneous network)
+    // - Protocol errors: when incompatible clients try to connect
+    // - IPv6 unreachable: when peers advertise IPv6 but we're IPv4-only
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 tracing_subscriber::EnvFilter::new("info")
                     // Reduce Iroh protocol connection noise
                     .add_directive("iroh::protocol=error".parse().unwrap())
+                    // Filter AEAD errors (incompatible peers, not actionable)
+                    .add_directive("iroh::magicsock=error".parse().unwrap())
+                    // Filter UDP sendmsg errors (IPv6 unreachable, network issues)
+                    .add_directive("iroh_quinn_udp=error".parse().unwrap())
             }),
         )
         .init();
@@ -548,9 +554,8 @@ async fn main() -> Result<()> {
     storage::BlobStorage::start_ttl_cleanup_task(storage.clone(), Some(60));
     tracing::info!("TTL cleanup background task started (interval: 60s)");
     
-    // Wrap network in Arc so we can share it with GraphQL while still moving it to tokio::spawn
-    let network = Arc::new(tokio::sync::Mutex::new(network));
-    let network_for_graphql = network.clone();
+    // Network will be moved into its own task - no Arc<Mutex<>> needed
+    // GraphQL uses the Endpoint directly, not IrohNetwork
 
     // Create outbound sync channel so other components (GraphQL) can send SyncMessage to network
     let (sync_out_tx, sync_out_rx) = tokio::sync::mpsc::unbounded_channel::<crate::sync::SyncMessage>();
@@ -561,7 +566,7 @@ async fn main() -> Result<()> {
         Some(sync_manager),
         Some(endpoint_for_graphql), // Pass endpoint instead of wrapped network
         Some(discovered_peers_map), // Pass discovered peers map
-        Some(network_for_graphql),   // Pass Arc<Mutex<IrohNetwork>> for dial_peer
+        None,   // IrohNetwork not needed - GraphQL uses Endpoint directly
         Some(peer_registry.clone()), // Pass PeerRegistry for mesh summary
         Some(network_resilience.clone()), // Pass NetworkResilience for circuit breaker, reputation, bandwidth
         relay_url_with_public_ip, // Pass relay URL with public IP
@@ -576,18 +581,17 @@ async fn main() -> Result<()> {
 
     // Start network event loop
     // Attach sync outbound receiver so GraphQL can submit SyncMessage to be broadcast
-    let mut network_locked = network.lock().await;
-    network_locked.set_sync_outbound_rx(sync_out_rx);
-    drop(network_locked);
-
+    network.set_sync_outbound_rx(sync_out_rx);
+    
+    // Move network into its own task - no mutex needed since it's single-owner
     tokio::spawn(async move {
+        let mut net = network;
         loop {
-            let mut net = network.lock().await;
             if let Err(e) = net.run().await {
                 tracing::error!("Network error: {}", e);
+                // Brief pause before retry
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
-            drop(net);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
     });
 

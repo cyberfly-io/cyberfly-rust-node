@@ -501,31 +501,30 @@ impl IrohNetwork {
         loop {
             check_interval.tick().await;
             
-            // Check if we have ANY connected peers (not isolated)
-            let has_any_connection = discovered_peers.len() > 0 || {
-                // Also check if any bootstrap peer is connected
-                bootstrap_peers.iter().any(|(node_id, _)| {
-                    if let Some(mut watcher) = endpoint.conn_type(*node_id) {
-                        use iroh::endpoint::ConnectionType;
-                        !matches!(watcher.get(), ConnectionType::None)
-                    } else {
-                        false
-                    }
-                })
-            };
+            // Check ACTUAL connection states, not just discovered_peers map
+            // discovered_peers can have stale entries between NeighborDown and cleanup
+            let active_peer_count = discovered_peers.len();
+            
+            // Double-check with actual connection types for bootstrap peers
+            let connected_bootstrap_count = bootstrap_peers.iter().filter(|(node_id, _)| {
+                if let Some(mut watcher) = endpoint.conn_type(*node_id) {
+                    use iroh::endpoint::ConnectionType;
+                    !matches!(watcher.get(), ConnectionType::None)
+                } else {
+                    false
+                }
+            }).count();
+            
+            let has_any_connection = active_peer_count > 0 || connected_bootstrap_count > 0;
             
             if has_any_connection {
-                // Not isolated - just update bootstrap peers in discovered_peers
-                let now = chrono::Utc::now();
-                for (node_id, socket_addr) in &bootstrap_peers {
-                    discovered_peers.insert(*node_id, (now, Some(*socket_addr)));
-                }
-                tracing::trace!("✓ Node has connections, skipping bootstrap reconnect");
+                tracing::trace!("✓ Node has {} active peers, {} connected bootstrap nodes", 
+                    active_peer_count, connected_bootstrap_count);
                 continue;
             }
             
             // Node is ISOLATED - reconnect to all bootstrap peers
-            tracing::warn!("⚠️  Node is ISOLATED (no peers) - reconnecting to bootstrap nodes");
+            tracing::warn!("⚠️  Node is ISOLATED (0 active peers, 0 bootstrap connections) - reconnecting to bootstrap nodes");
             
             for (node_id, socket_addr) in &bootstrap_peers {
                 tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
@@ -840,8 +839,14 @@ impl IrohNetwork {
                             match serde_json::from_slice::<crate::sync::SyncMessage>(&data) {
                                 Ok(sync_msg) => {
                                     if let Some(manager) = sync_manager.as_ref() {
-                                        match manager.handle_sync_message(sync_msg, peer).await {
-                                            Ok(Some(response)) => {
+                                        // Add timeout to prevent sync handler from blocking forever
+                                        let handle_result = tokio::time::timeout(
+                                            std::time::Duration::from_secs(30),
+                                            manager.handle_sync_message(sync_msg, peer)
+                                        ).await;
+                                        
+                                        match handle_result {
+                                            Ok(Ok(Some(response))) => {
                                                 if let Some(sender) = &sync_sender {
                                                     if let Ok(payload) = serde_json::to_vec(&response) {
                                                         if let Err(e) = sender.lock().await.broadcast(payload.into()).await {
@@ -850,9 +855,12 @@ impl IrohNetwork {
                                                     }
                                                 }
                                             }
-                                            Ok(None) => {}
-                                            Err(e) => {
+                                            Ok(Ok(None)) => {}
+                                            Ok(Err(e)) => {
                                                 tracing::error!("Failed to handle sync message from {}: {}", peer, e);
+                                            }
+                                            Err(_) => {
+                                                tracing::warn!("Sync message handler timed out for peer {}", peer);
                                             }
                                         }
                                     } else {
@@ -920,11 +928,22 @@ impl IrohNetwork {
         // Convert receivers to streams
         let mut data_stream = data_receiver;
         let mut sync_stream = sync_receiver;
+        
+        // Heartbeat interval to prove the event loop is alive
+        let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut event_count: u64 = 0;
 
         loop {
             tokio::select! {
+                // Heartbeat to prove liveness (helps debug hangs)
+                _ = heartbeat_interval.tick() => {
+                    tracing::info!("💓 Network event loop alive - processed {} events, {} active peers", 
+                        event_count, discovered_peers.len());
+                }
+                
                 // Handle gossip events from data topic
                 event_result = data_stream.next() => {
+                    event_count += 1;
                     match event_result {
                         Some(Ok(event)) => {
                             if let Err(e) = Self::handle_gossip_event(
@@ -1051,8 +1070,8 @@ impl IrohNetwork {
                 GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::info!("Sync neighbor down: {}", peer_node_id);
                 
-                // Don't send PeerExpired event - let the expiration cleanup task handle it
-                // This prevents confusing "Peer expired" logs on temporary disconnects
+                // Remove peer from discovered_peers to ensure accurate isolation detection
+                discovered_peers.remove(&peer_node_id);
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Sync gossip lagged - missed messages");
@@ -1232,7 +1251,8 @@ impl IrohNetwork {
             }
             GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::debug!("Peer discovery neighbor down: {}", peer_node_id);
-                // Don't remove immediately - let the expiration cleanup task handle it
+                // Remove peer to ensure accurate isolation detection
+                discovered_peers.remove(&peer_node_id);
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Peer discovery gossip lagged - missed messages");
@@ -1386,8 +1406,10 @@ impl IrohNetwork {
             GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::info!("Neighbor down: {}", peer_node_id);
                 
-                // Don't send PeerExpired event - let the expiration cleanup task handle it
-                // This prevents confusing "Peer expired" logs on temporary disconnects
+                // Remove peer from discovered_peers to ensure accurate isolation detection
+                discovered_peers.remove(&peer_node_id);
+                
+                // Don't send PeerExpired event - the peer might reconnect shortly
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Gossip lagged - missed messages");
