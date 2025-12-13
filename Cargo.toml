@@ -22,7 +22,7 @@ futures = "0.3"
 async-graphql = "7.0"
 async-graphql-axum = "7.0"
 axum = { version = "0.8", features = ["multipart"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Signature verification
 ed25519-dalek = { version = "3.0.0-pre.1", features = ["rand_core"] }

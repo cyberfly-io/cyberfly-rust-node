@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::{Stream, StreamExt};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
 
 use crate::{
     crypto, 
@@ -3099,6 +3100,8 @@ pub async fn create_server(
 
     let app = Router::new()
         .route("/", get(graphiql_handler))
+        .route("/health", get(health_check_handler))  // Simple health check (no deps)
+        .route("/ready", get(readiness_handler))      // Readiness check
         .route("/graphql", get(graphiql_handler).post(graphql_handler))
         .route("/ws", get(graphql_subscription_handler))
         .route("/playground", get(graphql_playground))
@@ -3108,16 +3111,48 @@ pub async fn create_server(
         .route("/blobs/upload", post(blob_upload_handler))
         .route("/blobs/{hash}", get(blob_download_handler))
         .layer(cors)
+        .layer(TraceLayer::new_for_http())  // Add request tracing
         .with_state(app_state);
 
     Ok(app)
 }
 
+/// Simple health check - returns immediately without touching any resources
+async fn health_check_handler() -> &'static str {
+    "OK"
+}
+
+/// Readiness check - verifies essential services are available
+async fn readiness_handler() -> impl IntoResponse {
+    // This could be extended to check storage, network, etc.
+    // For now, just confirm the server can handle requests
+    (axum::http::StatusCode::OK, "READY")
+}
+
 async fn graphql_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     req: GraphQLRequest,
-) -> GraphQLResponse {
-    state.schema.execute(req.into_inner()).await.into()
+) -> impl IntoResponse {
+    tracing::debug!("GraphQL request received");
+    
+    // Add timeout to prevent hanging forever on blocked queries
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        state.schema.execute(req.into_inner())
+    ).await {
+        Ok(response) => {
+            tracing::debug!("GraphQL request completed");
+            GraphQLResponse::from(response)
+        },
+        Err(_) => {
+            tracing::error!("GraphQL query timed out after 30 seconds");
+            // Return a timeout error response
+            let error_response = async_graphql::Response::from_errors(vec![
+                async_graphql::ServerError::new("Query timed out after 30 seconds", None)
+            ]);
+            GraphQLResponse::from(error_response)
+        }
+    }
 }
 
 async fn graphql_subscription_handler(
@@ -3136,6 +3171,8 @@ async fn graphql_playground() -> impl axum::response::IntoResponse {
 }
 
 async fn graphiql_handler() -> impl IntoResponse {
+    tracing::debug!("GraphiQL page request received");
+    
     let graphiql = async_graphql::http::GraphiQLSource::build()
         .endpoint("/graphql")
         .subscription_endpoint("/ws")
