@@ -144,7 +144,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Create Iroh endpoint with relay server capabilities
     // Use fixed port 31001 for predictable peer-to-peer connectivity
     let bind_addr = std::net::SocketAddrV4::new(
         std::net::Ipv4Addr::UNSPECIFIED, // 0.0.0.0 - listen on all interfaces
