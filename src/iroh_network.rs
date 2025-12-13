@@ -164,15 +164,11 @@ pub struct IrohNetwork {
     sync_manager: Option<crate::sync::SyncManager>,
     // Gossip topics
     data_topic: TopicId,
-    discovery_topic: TopicId,
-    sync_topic: TopicId,  // New topic for data sync
-    peer_discovery_topic: TopicId,  // New topic for peer list announcements
-    improved_discovery_topic: TopicId,  // Improved gossip discovery topic (postcard + ed25519)
+    sync_topic: TopicId,  // Topic for data sync
+    discovery_topic: TopicId,  // Unified discovery topic (postcard + ed25519)
     // Senders for broadcasting (set after subscribing)
     data_sender: Option<Arc<Mutex<GossipSender>>>,
-    discovery_sender: Option<Arc<Mutex<GossipSender>>>,
     sync_sender: Option<Arc<Mutex<GossipSender>>>,  // Sync topic sender
-    peer_discovery_sender: Option<Arc<Mutex<GossipSender>>>,  // Peer discovery sender
     // Improved gossip discovery (postcard serialization + ed25519 signatures)
     improved_discovery_peers: Arc<dashmap::DashMap<EndpointId, PeerInfo>>,
     // Peer tracking with addresses - stores peers seen in gossip messages
@@ -282,10 +278,9 @@ impl IrohNetwork {
 
         // Create gossip topics (all must be exactly 32 bytes)
         let data_topic = TopicId::from_bytes(*b"decentralized-db-data-v1-iroh!!!");
-        let discovery_topic = TopicId::from_bytes(*b"decentralized-db-discovery-iroh!");
         let sync_topic = TopicId::from_bytes(*b"decentralized-db-sync-v1-iroh!!!");
-        let peer_discovery_topic = TopicId::from_bytes(*b"decentralized-peer-list-v1-iroh!");
-        let improved_discovery_topic = TopicId::from_bytes(*b"cyberfly-discovery-v2-postcard!!");
+        // Unified discovery topic using postcard + ed25519 signatures
+        let discovery_topic = TopicId::from_bytes(*b"cyberfly-discovery-v2-postcard!!");
         
         // Parse bootstrap peers (includes hardcoded peer, filtered by local node_id)
         let bootstrap_peers = Self::parse_bootstrap_peers(&bootstrap_peer_strings, node_id);
@@ -304,14 +299,10 @@ impl IrohNetwork {
             sync_outbound_rx: None,
             sync_manager: None,
             data_topic,
-            discovery_topic,
             sync_topic,
-            peer_discovery_topic,
-            improved_discovery_topic,
+            discovery_topic,
             data_sender: None,
-            discovery_sender: None,
             sync_sender: None,
-            peer_discovery_sender: None,
             improved_discovery_peers: Arc::new(dashmap::DashMap::new()),
             discovered_peers: Arc::new(dashmap::DashMap::new()),
             peer_announcement_cache: Arc::new(dashmap::DashMap::new()),
@@ -702,12 +693,6 @@ impl IrohNetwork {
         let (data_sender, data_receiver) = data_topic.split();
         self.data_sender = Some(Arc::new(Mutex::new(data_sender)));
         tracing::info!("Subscribed to data topic");
-
-        // Subscribe to discovery topic with bootstrap peers
-        let discovery_topic = self.gossip.subscribe(self.discovery_topic, bootstrap_peers.clone()).await?;
-        let (discovery_sender, mut discovery_receiver) = discovery_topic.split();
-        self.discovery_sender = Some(Arc::new(Mutex::new(discovery_sender)));
-        tracing::info!("Subscribed to discovery topic");
         
         // Subscribe to sync topic with bootstrap peers
         let sync_topic = self.gossip.subscribe(self.sync_topic, bootstrap_peers.clone()).await?;
@@ -715,53 +700,37 @@ impl IrohNetwork {
         self.sync_sender = Some(Arc::new(Mutex::new(sync_sender)));
         tracing::info!("Subscribed to sync topic");
 
-        // Subscribe to peer discovery topic with bootstrap peers
-        let peer_discovery_topic = self.gossip.subscribe(self.peer_discovery_topic, bootstrap_peers.clone()).await?;
-        let (peer_discovery_sender, peer_discovery_receiver) = peer_discovery_topic.split();
-        self.peer_discovery_sender = Some(Arc::new(Mutex::new(peer_discovery_sender)));
-        tracing::info!("Subscribed to peer discovery topic");
-
-        // Initialize improved gossip discovery (postcard + ed25519 signatures)
-        // This runs alongside the legacy JSON-based discovery for backward compatibility
-        // Increased expiration timeout from 30s to 300s (5 min) to prevent node isolation
+        // Initialize unified gossip discovery (postcard + ed25519 signatures)
+        // This is the only discovery mechanism - simple and secure
         let (mut improved_sender, mut improved_receiver) = GossipDiscoveryBuilder::new()
             .with_expiration_timeout(std::time::Duration::from_secs(300))
             .with_broadcast_interval(std::time::Duration::from_secs(5))
             .build(
                 self.gossip.clone(),
-                self.improved_discovery_topic,
+                self.discovery_topic,
                 bootstrap_peers.clone(),
                 &self.endpoint,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to initialize improved discovery: {}", e))?;
-        tracing::info!("✓ Initialized improved gossip discovery (postcard + ed25519)");
+            .map_err(|e| anyhow::anyhow!("Failed to initialize discovery: {}", e))?;
+        tracing::info!("✓ Initialized gossip discovery (postcard + ed25519)");
 
-        // Store reference to improved discovery peer map
+        // Store reference to discovery peer map
         let improved_peers_ref = Arc::clone(&improved_receiver.neighbor_map);
         self.improved_discovery_peers = improved_peers_ref;
 
         // Wait for peers to join before starting broadcasts (following iroh-gossip best practices)
         if !bootstrap_peers.is_empty() {
             tracing::info!("Waiting for peers to join gossip network...");
-            tokio::select! {
-                result = discovery_receiver.joined() => {
-                    match result {
-                        Ok(_) => tracing::info!("✓ Successfully joined gossip network with peers"),
-                        Err(e) => tracing::warn!("Failed to join gossip network: {}", e),
-                    }
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
-                    tracing::warn!("Timeout waiting for peers to join - continuing anyway");
-                }
-            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tracing::info!("✓ Gossip network initialization complete");
         }
 
         // Get node_id first before using in beacon task
         let node_id = self.node_id;
         let secret_key = self.endpoint.secret_key().clone();
 
-        // Start improved discovery sender task
+        // Start discovery sender task
         let discovery_node = DiscoveryNode {
             name: format!("cyberfly-{}", &node_id.to_string()[..8]),
             node_id,
@@ -780,110 +749,68 @@ impl IrohNetwork {
                 tracing::error!("Improved discovery sender error: {}", e);
             }
         });
-        tracing::info!("🚀 Started improved discovery sender (postcard serialization, 5s interval)");
+        tracing::info!("🚀 Started discovery sender (postcard + ed25519, 5s interval)");
 
-        // Start improved discovery receiver task
-        let improved_event_tx = self.event_tx.clone();
+        // Start discovery receiver task
         let improved_discovered_peers = Arc::clone(&self.discovered_peers);
+        let improved_neighbor_map = Arc::clone(&improved_receiver.neighbor_map);
+        let endpoint_for_improved = self.endpoint.clone();
+        
+        // Task 1: Run the receiver (processes incoming gossip messages)
         tokio::spawn(async move {
             if let Err(e) = improved_receiver.run().await {
-                tracing::error!("Improved discovery receiver error: {}", e);
+                tracing::error!("Discovery receiver error: {}", e);
             }
         });
-        tracing::info!("🚀 Started improved discovery receiver (ed25519 signature verification)");
-
-        // Start peer list announcement task - broadcasts connected peers every 10 seconds
-        // This enables full mesh topology by sharing peer lists across the network
-        let peer_list_sender = Arc::clone(self.peer_discovery_sender.as_ref().unwrap());
-        let peer_list_node_id = node_id;
-        let peer_list_discovered_peers = Arc::clone(&self.discovered_peers);
-        let peer_list_secret_key = secret_key.clone();
-        let peer_list_endpoint = self.endpoint.clone();
+        
+        // Task 2: Sync discovered peers from neighbor_map to discovered_peers
+        // This bridges the gap between the gossip discovery module and the main peer tracking
         tokio::spawn(async move {
-            // Wait before starting announcements to allow gossip network to stabilize
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
             loop {
                 interval.tick().await;
                 
-                // Get current list of connected peers with addresses
-                let connected_peers: Vec<String> = peer_list_discovered_peers
-                    .iter()
-                    .filter_map(|entry| {
-                        let peer_id = *entry.key();
-                        let (_timestamp, stored_addr) = entry.value().clone();
-                        
-                        // Include peer with address if available
-                        // For peers without addresses (connected TO us), include them without address
-                        // Other nodes can discover them via DHT or relay
-                        if let Some(addr) = stored_addr {
-                            Some(format!("{}@{}", peer_id, addr))
-                        } else {
-                            // Include peer ID without address - let DHT/relay handle discovery
-                            Some(peer_id.to_string())
+                // Iterate over all peers in the discovery neighbor map
+                for entry in improved_neighbor_map.iter() {
+                    let peer_id = *entry.key();
+                    let peer_info = entry.value();
+                    
+                    // Skip if we already have this peer
+                    if improved_discovered_peers.contains_key(&peer_id) {
+                        continue;
+                    }
+                    
+                    // Try to connect to the discovered peer
+                    tracing::info!(
+                        "🔗 Discovery found new peer: {} ({}), attempting connection...",
+                        peer_info.name,
+                        peer_id
+                    );
+                    
+                    match endpoint_for_improved.connect(peer_id, iroh_gossip::ALPN).await {
+                        Ok(_conn) => {
+                            improved_discovered_peers.insert(peer_id, (chrono::Utc::now(), None));
+                            tracing::info!(
+                                "✓ Connected to peer: {} (region: {})",
+                                peer_info.name,
+                                peer_info.region
+                            );
                         }
-                    })
-                    .collect();
-                
-                // Create signed peer announcement
-                let announcement = PeerDiscoveryAnnouncement::new(
-                    peer_list_node_id,
-                    connected_peers.clone(),
-                    crate::node_region::get_node_region(),
-                    &peer_list_secret_key,
-                );
-                
-                if let Ok(announcement_bytes) = serde_json::to_vec(&announcement) {
-                    let sender = peer_list_sender.lock().await;
-                    if let Err(e) = sender.broadcast(announcement_bytes.into()).await {
-                        tracing::debug!("Peer list announcement broadcast error: {}", e);
-                    } else {
-                        tracing::debug!(
-                            "📡 Broadcasted signed peer list: {} connected peers from region {}",
-                            connected_peers.len(),
-                            announcement.region
-                        );
+                        Err(e) => {
+                            tracing::debug!(
+                                "Failed to connect to peer {}: {}",
+                                peer_id, e
+                            );
+                        }
                     }
                 }
             }
         });
-        tracing::info!("🌐 Started peer discovery protocol with cryptographic signatures (broadcasts every 10s)");
+        tracing::info!("🚀 Started discovery receiver (ed25519 signature verification)");
 
         // NOTE: Peer expiration is DISABLED - peers are never removed automatically
         // Bootstrap connection monitor handles reconnection to maintain network connectivity
         tracing::info!("✓ Peer expiration disabled - peers persist until node restart");
-
-        // Start a peer discovery broadcast task (only after successful gossip join)
-        // This helps peers find each other by periodically sending discovery beacons
-        let discovery_beacon_sender = Arc::clone(self.discovery_sender.as_ref().unwrap());
-        let beacon_node_id = node_id;
-        tokio::spawn(async move {
-            // Wait a bit before starting beacons to allow gossip network to stabilize
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15)); // Reduced frequency
-            loop {
-                interval.tick().await;
-                
-                // Broadcast a simple beacon message
-                let beacon = serde_json::json!({
-                    "type": "discovery_beacon",
-                    "node_id": beacon_node_id.to_string(),
-                    "timestamp": chrono::Utc::now().timestamp(),
-                });
-                
-                if let Ok(beacon_bytes) = serde_json::to_vec(&beacon) {
-                    let sender = discovery_beacon_sender.lock().await;
-                    if let Err(e) = sender.broadcast(beacon_bytes.into()).await {
-                        tracing::debug!("Discovery beacon broadcast error: {}", e);
-                    } else {
-                        tracing::trace!("Sent discovery beacon");
-                    }
-                }
-            }
-        });
-        tracing::info!("🔍 Started peer discovery beacon (broadcasts every 10s)");
 
         // Process inbound network events and route to SyncManager
         {
@@ -989,14 +916,10 @@ impl IrohNetwork {
         let libp2p_to_mqtt_tx = &self.libp2p_to_mqtt_tx;
         let event_tx = &self.event_tx;
         let discovered_peers = &self.discovered_peers;
-        let peer_announcement_cache = &self.peer_announcement_cache;
-        let endpoint_for_dial = &self.endpoint;
 
-        // Convert receivers to streams (no need to Box them - they're already streamable)
+        // Convert receivers to streams
         let mut data_stream = data_receiver;
-        let mut discovery_stream = discovery_receiver;
         let mut sync_stream = sync_receiver;
-        let mut peer_discovery_stream = peer_discovery_receiver;
 
         loop {
             tokio::select! {
@@ -1025,31 +948,6 @@ impl IrohNetwork {
                         }
                     }
                 }
-
-                // Handle gossip events from discovery topic
-                event_result = discovery_stream.next() => {
-                    match event_result {
-                        Some(Ok(event)) => {
-                            if let Err(e) = Self::handle_gossip_event(
-                                event, 
-                                "discovery", 
-                                node_id,
-                                event_tx,
-                                libp2p_to_mqtt_tx,
-                                discovered_peers,
-                                &data_sender_clone,
-                            ).await {
-                                tracing::error!("Error handling discovery gossip event: {}", e);
-                            }
-                        }
-                        Some(Err(e)) => {
-                            tracing::error!("Error reading discovery stream: {}", e);
-                        }
-                        None => {
-                            tracing::warn!("Discovery stream ended");
-                        }
-                    }
-                }
                 
                 // Handle gossip events from sync topic
                 event_result = sync_stream.next() => {
@@ -1064,29 +962,6 @@ impl IrohNetwork {
                         }
                         None => {
                             tracing::warn!("Sync stream ended");
-                        }
-                    }
-                }
-
-                // Handle peer discovery announcements
-                event_result = peer_discovery_stream.next() => {
-                    match event_result {
-                        Some(Ok(event)) => {
-                            if let Err(e) = Self::handle_peer_discovery_event(
-                                event,
-                                node_id,
-                                discovered_peers,
-                                peer_announcement_cache,
-                                endpoint_for_dial,
-                            ).await {
-                                tracing::error!("Error handling peer discovery event: {}", e);
-                            }
-                        }
-                        Some(Err(e)) => {
-                            tracing::error!("Error reading peer discovery stream: {}", e);
-                        }
-                        None => {
-                            tracing::warn!("Peer discovery stream ended");
                         }
                     }
                 }
@@ -1572,30 +1447,9 @@ impl IrohNetwork {
 
     /// Announce presence to network
     pub async fn announce_presence(&self) -> Result<()> {
-        let Some(ref sender) = self.discovery_sender else {
-            anyhow::bail!("Network not started - call run() first");
-        };
-
-        let endpoint_addr = self.endpoint.addr();
-        let relay_url = endpoint_addr
-            .relay_urls()
-            .next()
-            .map(|u| u.to_string());
-        let ip_addresses: Vec<String> = endpoint_addr
-            .ip_addrs()
-            .map(|addr| addr.to_string())
-            .collect();
-        
-        let announcement = serde_json::json!({
-            "node_id": self.node_id.to_string(),
-            "relay_url": relay_url,
-            "ip_addresses": ip_addresses,
-        });
-
-        let payload = serde_json::to_vec(&announcement)?;
-        sender.lock().await.broadcast(payload.into()).await?;
-
-        tracing::debug!("Announced presence to network");
+        // Discovery is handled exclusively by the postcard+ed25519 discovery module.
+        // Keeping this method for API compatibility.
+        tracing::debug!("announce_presence is a no-op; discovery is automatic");
         Ok(())
     }
     

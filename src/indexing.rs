@@ -318,7 +318,7 @@ impl IndexManager {
         let index_key = (db_name.to_string(), index_name.to_string());
         
         if let Some(index) = indexes.get_mut(&index_key) {
-            index.insert(field_value, key);
+            index.insert(field_value, key)?;
             Ok(())
         } else {
             anyhow::bail!("Index '{}' not found in database '{}'", index_name, db_name)

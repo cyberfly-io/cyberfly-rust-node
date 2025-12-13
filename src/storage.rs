@@ -227,7 +227,7 @@ impl TieredCache {
         }
     }
 
-    fn get(&self, key: &str) -> Option<Arc<StoredValue>> {
+    async fn get(&self, key: &str) -> Option<Arc<StoredValue>> {
         // Check hot tier first (most frequent)
         if let Some(value) = self.hot.get(key) {
             metrics::CACHE_HITS.inc();
@@ -238,7 +238,7 @@ impl TieredCache {
         // Check warm tier
         if let Some(value) = self.warm.get(key) {
             // Promote to hot tier on access
-            self.hot.insert(key.to_string(), Arc::clone(&value));
+            self.hot.insert(key.to_string(), Arc::clone(&value)).await;
             metrics::CACHE_HITS.inc();
             metrics::CACHE_WARM_HITS.inc();
             return Some(value);
@@ -610,7 +610,7 @@ impl BlobStorage {
         let timer = Timer::new();
         
         // Check cache first (fast path, Arc-based zero-copy)
-        if let Some(value) = self.cache.get(key) {
+        if let Some(value) = self.cache.get(key).await {
             // Check TTL before returning cached value
             if Self::is_value_expired(&value) {
                 // Expired - invalidate cache and delete from storage

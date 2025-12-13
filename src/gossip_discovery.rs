@@ -199,12 +199,21 @@ impl GossipDiscoveryBuilder {
     ) -> Result<(DiscoverySender, DiscoveryReceiver)> {
         info!(
             peer_count = initial_peers.len(),
-            "Subscribing to gossip discovery topic"
+            topic = %hex::encode(&topic_id.as_bytes()[..8]),
+            "📡 Subscribing to gossip discovery topic (improved)"
         );
+        
+        if initial_peers.is_empty() {
+            warn!("⚠️ No initial peers for gossip discovery - messages may not propagate");
+        } else {
+            for peer in &initial_peers {
+                debug!(%peer, "Initial peer for gossip discovery");
+            }
+        }
         
         let topic = gossip.subscribe(topic_id, initial_peers).await?;
         let (sender, receiver) = topic.split();
-        info!("Subscribed to gossip discovery topic");
+        info!("✓ Subscribed to gossip discovery topic (improved)");
 
         let (peer_tx, peer_rx) = tokio::sync::mpsc::unbounded_channel();
         let neighbor_map = Arc::new(DashMap::new());
@@ -266,6 +275,11 @@ impl DiscoverySender {
     /// This continuously broadcasts signed discovery announcements.
     /// New peers are discovered and tracked by the receiver.
     pub async fn run(&mut self, mut node: DiscoveryNode) -> Result<()> {
+        info!(
+            node_id = %node.node_id,
+            name = %node.name,
+            "🔊 Starting gossip discovery sender loop..."
+        );
         loop {
             // Drain any peer notifications (for logging/metrics only)
             // Gossip handles the actual peer management
@@ -275,10 +289,11 @@ impl DiscoverySender {
 
             // Broadcast our presence
             let bytes = SignedDiscoveryMessage::sign_and_encode(&self.secret_key, &node)?;
+            let bytes_len = bytes.len();
             if let Err(e) = self.sender.broadcast(bytes.into()).await {
-                error!(%e, "Failed to broadcast discovery");
+                error!(%e, "❌ Failed to broadcast discovery");
             } else {
-                debug!(count = node.count, "Broadcast discovery announcement");
+                debug!(count = node.count, bytes_len, "📡 Broadcast discovery announcement");
             }
 
             node.count += 1;
@@ -298,6 +313,7 @@ pub struct DiscoveryReceiver {
 impl DiscoveryReceiver {
     /// Process incoming discovery messages
     pub async fn run(&mut self) -> Result<()> {
+        info!("🔊 Starting gossip discovery receiver loop...");
         while let Some(result) = self.receiver.next().await {
             let event = match result {
                 Ok(e) => e,
@@ -309,22 +325,28 @@ impl DiscoveryReceiver {
             
             match event {
                 Event::Received(msg) => {
+                    debug!(
+                        content_len = msg.content.len(),
+                        from = %msg.delivered_from,
+                        "📨 Received gossip discovery message"
+                    );
                     self.handle_message(&msg.content).await?;
                 }
                 Event::NeighborUp(peer) => {
-                    info!(%peer, "Gossip neighbor connected");
+                    info!(%peer, "🟢 Gossip discovery neighbor connected");
                     // Update metrics
                     crate::metrics::PEER_CONNECTIONS_TOTAL.inc();
                 }
                 Event::NeighborDown(peer) => {
-                    info!(%peer, "Gossip neighbor disconnected");
+                    info!(%peer, "🔴 Gossip discovery neighbor disconnected");
                     // Don't remove immediately - let cleanup task handle expiration
                 }
                 Event::Lagged => {
-                    warn!("Gossip discovery lagged - missed messages");
+                    warn!("⚠️ Gossip discovery lagged - missed messages");
                 }
             }
         }
+        warn!("Gossip discovery receiver loop ended unexpectedly");
         Ok(())
     }
 
