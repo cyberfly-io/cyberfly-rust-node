@@ -766,11 +766,20 @@ impl IrohNetwork {
         // This bridges the gap between the gossip discovery module and the main peer tracking
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            const MAX_CONNECTIONS_PER_CYCLE: usize = 3; // Limit connection attempts per cycle
+            
             loop {
                 interval.tick().await;
                 
+                let mut connections_this_cycle = 0;
+                
                 // Iterate over all peers in the discovery neighbor map
                 for entry in improved_neighbor_map.iter() {
+                    // Limit connections per cycle to prevent overwhelming the system
+                    if connections_this_cycle >= MAX_CONNECTIONS_PER_CYCLE {
+                        break;
+                    }
+                    
                     let peer_id = *entry.key();
                     let peer_info = entry.value();
                     
@@ -778,6 +787,8 @@ impl IrohNetwork {
                     if improved_discovered_peers.contains_key(&peer_id) {
                         continue;
                     }
+                    
+                    connections_this_cycle += 1;
                     
                     // Try to connect to the discovered peer
                     tracing::info!(
@@ -932,8 +943,18 @@ impl IrohNetwork {
         // Heartbeat interval to prove the event loop is alive
         let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(60));
         let mut event_count: u64 = 0;
+        
+        // Yield counter - yield to runtime periodically to prevent starvation
+        let mut ops_since_yield: u32 = 0;
+        const YIELD_EVERY_N_OPS: u32 = 50;
 
         loop {
+            // Yield periodically to allow other tasks to run (prevents runtime starvation)
+            if ops_since_yield >= YIELD_EVERY_N_OPS {
+                tokio::task::yield_now().await;
+                ops_since_yield = 0;
+            }
+            
             tokio::select! {
                 // Heartbeat to prove liveness (helps debug hangs)
                 _ = heartbeat_interval.tick() => {
@@ -944,6 +965,7 @@ impl IrohNetwork {
                 // Handle gossip events from data topic
                 event_result = data_stream.next() => {
                     event_count += 1;
+                    ops_since_yield += 1;
                     match event_result {
                         Some(Ok(event)) => {
                             if let Err(e) = Self::handle_gossip_event(
@@ -970,6 +992,7 @@ impl IrohNetwork {
                 
                 // Handle gossip events from sync topic
                 event_result = sync_stream.next() => {
+                    ops_since_yield += 1;
                     match event_result {
                         Some(Ok(event)) => {
                             if let Err(e) = Self::handle_sync_event(event, node_id, event_tx, discovered_peers).await {
