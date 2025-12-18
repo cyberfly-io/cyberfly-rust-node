@@ -166,9 +166,11 @@ pub struct IrohNetwork {
     data_topic: TopicId,
     sync_topic: TopicId,  // Topic for data sync
     discovery_topic: TopicId,  // Unified discovery topic (postcard + ed25519)
+    latency_topic: TopicId,  // Topic for fetch-latency-request
     // Senders for broadcasting (set after subscribing)
     data_sender: Option<Arc<Mutex<GossipSender>>>,
     sync_sender: Option<Arc<Mutex<GossipSender>>>,  // Sync topic sender
+    latency_sender: Option<Arc<Mutex<GossipSender>>>,  // Latency topic sender
     // Improved gossip discovery (postcard serialization + ed25519 signatures)
     improved_discovery_peers: Arc<dashmap::DashMap<EndpointId, PeerInfo>>,
     // Peer tracking with addresses - stores peers seen in gossip messages
@@ -281,6 +283,8 @@ impl IrohNetwork {
         let sync_topic = TopicId::from_bytes(*b"decentralized-db-sync-v1-iroh!!!");
         // Unified discovery topic using postcard + ed25519 signatures
         let discovery_topic = TopicId::from_bytes(*b"cyberfly-discovery-v2-postcard!!");
+        // Latency request topic for fetch-latency-request API
+        let latency_topic = TopicId::from_bytes(*b"cyberfly-fetch-latency-request!!");
         
         // Parse bootstrap peers (includes hardcoded peer, filtered by local node_id)
         let bootstrap_peers = Self::parse_bootstrap_peers(&bootstrap_peer_strings, node_id);
@@ -301,8 +305,10 @@ impl IrohNetwork {
             data_topic,
             sync_topic,
             discovery_topic,
+            latency_topic,
             data_sender: None,
             sync_sender: None,
+            latency_sender: None,
             improved_discovery_peers: Arc::new(dashmap::DashMap::new()),
             discovered_peers: Arc::new(dashmap::DashMap::new()),
             peer_announcement_cache: Arc::new(dashmap::DashMap::new()),
@@ -698,6 +704,12 @@ impl IrohNetwork {
         let (sync_sender, sync_receiver) = sync_topic.split();
         self.sync_sender = Some(Arc::new(Mutex::new(sync_sender)));
         tracing::info!("Subscribed to sync topic");
+        
+        // Subscribe to latency topic for fetch-latency-request API
+        let latency_topic = self.gossip.subscribe(self.latency_topic, bootstrap_peers.clone()).await?;
+        let (latency_sender, latency_receiver) = latency_topic.split();
+        self.latency_sender = Some(Arc::new(Mutex::new(latency_sender)));
+        tracing::info!("Subscribed to fetch-latency-request topic");
 
         // Initialize unified gossip discovery (postcard + ed25519 signatures)
         // This is the only discovery mechanism - simple and secure
@@ -932,6 +944,7 @@ impl IrohNetwork {
         }
         // Get references for the event loop (no clones needed - already Arc-wrapped)
         let data_sender_clone = self.data_sender.clone().unwrap();
+        let latency_sender_clone = self.latency_sender.clone().unwrap();
         let libp2p_to_mqtt_tx = &self.libp2p_to_mqtt_tx;
         let event_tx = &self.event_tx;
         let discovered_peers = &self.discovered_peers;
@@ -939,6 +952,7 @@ impl IrohNetwork {
         // Convert receivers to streams
         let mut data_stream = data_receiver;
         let mut sync_stream = sync_receiver;
+        let mut latency_stream = latency_receiver;
         
         // Heartbeat interval to prove the event loop is alive
         let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -1004,6 +1018,29 @@ impl IrohNetwork {
                         }
                         None => {
                             tracing::warn!("Sync stream ended");
+                        }
+                    }
+                }
+                
+                // Handle gossip events from fetch-latency-request topic
+                event_result = latency_stream.next() => {
+                    ops_since_yield += 1;
+                    match event_result {
+                        Some(Ok(event)) => {
+                            if let Err(e) = Self::handle_latency_event(
+                                event,
+                                node_id,
+                                discovered_peers,
+                                &latency_sender_clone,
+                            ).await {
+                                tracing::error!("Error handling latency gossip event: {}", e);
+                            }
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!("Error reading latency stream: {}", e);
+                        }
+                        None => {
+                            tracing::warn!("Latency stream ended");
                         }
                     }
                 }
@@ -1098,6 +1135,54 @@ impl IrohNetwork {
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Sync gossip lagged - missed messages");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle fetch-latency-request gossip events
+    async fn handle_latency_event(
+        event: GossipEvent,
+        node_id: EndpointId,
+        discovered_peers: &Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>,
+        latency_sender: &Arc<Mutex<GossipSender>>,
+    ) -> Result<()> {
+        match event {
+            GossipEvent::Received(msg) => {
+                let from = msg.delivered_from;
+                tracing::info!("⏱️  Received fetch-latency-request from {} ({} bytes)", from, msg.content.len());
+
+                // Ignore our own messages
+                if from == node_id {
+                    return Ok(());
+                }
+
+                // Track this peer (update timestamp, keep existing address if any)
+                discovered_peers.entry(from).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
+
+                // Handle the latency request in a separate task
+                let data = msg.content.to_vec();
+                let sender = latency_sender.clone();
+                let node_id_str = node_id.to_string();
+                tokio::spawn(async move {
+                    if let Err(e) = Self::handle_fetch_latency_request(data, sender, node_id_str).await {
+                        tracing::error!("Failed to handle fetch latency request: {}", e);
+                    }
+                });
+            }
+            GossipEvent::NeighborUp(peer_node_id) => {
+                tracing::debug!("Latency topic neighbor up: {}", peer_node_id);
+                discovered_peers.entry(peer_node_id).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
+            }
+            GossipEvent::NeighborDown(peer_node_id) => {
+                tracing::debug!("Latency topic neighbor down: {}", peer_node_id);
+                // Don't remove from discovered_peers here - other topics may still have the peer
+            }
+            GossipEvent::Lagged => {
+                tracing::warn!("Latency gossip lagged - missed messages");
             }
         }
 
@@ -1323,23 +1408,6 @@ impl IrohNetwork {
                         Ok(gossip_msg) => {
                             tracing::info!("📨 Received gossip message - origin: {}, topic: {:?}, from: {}", 
                                 gossip_msg.origin, gossip_msg.topic, from);
-                            
-                            // Check if this is a fetch latency request
-                            if let Some(ref topic) = gossip_msg.topic {
-                                if topic == "fetch-latency-request" {
-                                    tracing::info!("⏱️  Received fetch-latency-request");
-                                    // Handle fetch latency request in a separate task
-                                    let data = gossip_msg.payload.clone();
-                                    let sender = data_sender.clone();
-                                    let node_id_str = node_id.to_string();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = Self::handle_fetch_latency_request(data, sender, node_id_str).await {
-                                            tracing::error!("Failed to handle fetch latency request: {}", e);
-                                        }
-                                    });
-                                    return Ok(());
-                                }
-                            }
                             
                             // Check if this is a bridge message with metadata
                             let actual_data = gossip_msg.payload;
@@ -1746,10 +1814,10 @@ impl IrohNetwork {
     /// Publish latency response to api-latency topic
     async fn publish_latency_response(
         response: impl serde::Serialize,
-        data_sender: Arc<Mutex<GossipSender>>,
+        latency_sender: Arc<Mutex<GossipSender>>,
         node_id: String,
     ) -> Result<()> {
-        // Publish response to api-latency topic
+        // Publish response to api-latency topic (on the latency gossip topic)
         let response_msg = GossipMessage {
             origin: "local".to_string(),
             broker: node_id.clone(),
@@ -1760,9 +1828,9 @@ impl IrohNetwork {
         };
 
         let payload = serde_json::to_vec(&response_msg)?;
-        data_sender.lock().await.broadcast(payload.into()).await?;
+        latency_sender.lock().await.broadcast(payload.into()).await?;
         
-        tracing::info!("📤 Published api-latency response");
+        tracing::info!("📤 Published api-latency response to latency topic");
         Ok(())
     }
 
