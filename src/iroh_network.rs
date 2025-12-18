@@ -1549,7 +1549,7 @@ impl IrohNetwork {
         
         // Whitelist of allowed public keys (same as TypeScript version)
         const WHITELISTED_KEYS: &[&str] = &[
-            "efcfe1ac4de7bcb991d8b08a7d8ebed2377a6ed1070636dc66d9cdd225458aaa"
+            "f53f94261cd3c60832c347fda7b92c6c8b7249baab8196a5bfc3915418c43e72"
         ];
         
         // Parse the outer request structure with signature
