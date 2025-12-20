@@ -335,6 +335,18 @@ async fn main() -> Result<()> {
     let peer_id = network.peer_id();
     tracing::info!("Iroh network initialized with shared Node ID: {}", peer_id);
 
+    // Initialize network resilience (circuit breaker, reputation, bandwidth)
+    let resilience = std::sync::Arc::new(network_resilience::NetworkResilience::new(
+        network_resilience::CircuitBreakerConfig::default(),
+        network_resilience::ReputationConfig::default(),
+        network_resilience::BandwidthConfig::default(),
+    ));
+    // Start background tasks (decay, etc.) for resilience
+    resilience.clone().start_background_tasks();
+    // Attach resilience manager to the network so dialing respects circuit/reputation
+    network.attach_resilience(resilience.clone());
+    tracing::info!("NetworkResilience attached to Iroh network");
+
     // Attach SyncManager to the network for inbound event handling
     network.attach_sync_manager(sync_manager.clone());
     tracing::info!("SyncManager attached to Iroh network for sync routing");

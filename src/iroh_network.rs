@@ -22,6 +22,9 @@ use crate::gossip_discovery::{
     NodeCapabilities, PeerInfo,
 };
 
+// Shared hardcoded bootstrap (used when no bootstrap peers configured).
+pub const HARDCODED_BOOTSTRAP: &str = "04b754ba2a3da0970d72d08b8740fb2ad96e63cf8f8bef6b7f1ab84e5b09a7f8@67.211.219.34:31001";
+
 /// Network event types
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
@@ -182,6 +185,10 @@ pub struct IrohNetwork {
     bootstrap_peers: Vec<EndpointId>,
     // Original bootstrap peer strings (with addresses)
     bootstrap_peer_strings: Vec<String>,
+    // Optional network resilience manager (circuit breaker, reputation, bandwidth)
+    resilience: Option<Arc<crate::network_resilience::NetworkResilience>>,
+    // Per-peer connect backoff state: (failure_count, next_allowed_attempt)
+    peer_backoff: Arc<dashmap::DashMap<EndpointId, (u32, chrono::DateTime<chrono::Utc>)>>,
 }
 
 impl IrohNetwork {
@@ -314,7 +321,15 @@ impl IrohNetwork {
             peer_announcement_cache: Arc::new(dashmap::DashMap::new()),
             bootstrap_peers,
             bootstrap_peer_strings,
+            resilience: None,
+            peer_backoff: Arc::new(dashmap::DashMap::new()),
         }
+    }
+
+    /// Attach a `NetworkResilience` manager so the network can consult
+    /// circuit breakers / reputation before attempting connections.
+    pub fn attach_resilience(&mut self, resilience: Arc<crate::network_resilience::NetworkResilience>) {
+        self.resilience = Some(resilience);
     }
 
     /// Get the local node ID
@@ -335,15 +350,21 @@ impl IrohNetwork {
     /// Dial a peer by their public key (EndpointId)
     pub async fn dial_peer(&self, peer_id: EndpointId) -> anyhow::Result<()> {
         tracing::info!("Attempting to dial peer: {}", peer_id);
+        // Metric: record connection attempt
+        crate::metrics::PEER_CONNECTIONS_TOTAL.inc();
         
         // Use gossip ALPN for peer connections
         let alpn = iroh_gossip::ALPN;
         
         // Add the peer to the endpoint's address book
         // The endpoint will attempt to establish a connection
-        let conn = self.endpoint.connect(peer_id, alpn)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to peer {}: {}", peer_id, e))?;
+        let conn = match self.endpoint.connect(peer_id, alpn).await {
+            Ok(c) => c,
+            Err(e) => {
+                crate::metrics::PEER_CONNECTION_FAILURES.inc();
+                return Err(anyhow::anyhow!("Failed to connect to peer {}: {}", peer_id, e));
+            }
+        };
         
         tracing::info!("Successfully connected to peer: {}", peer_id);
         
@@ -383,9 +404,6 @@ impl IrohNetwork {
     /// Add bootstrap peer addresses to endpoint's address book with retry logic
     async fn add_bootstrap_addresses(&self, peer_strings: &[String]) -> Result<()> {
         use std::net::SocketAddr;
-        
-        // Hardcoded bootstrap node
-        const HARDCODED_BOOTSTRAP: &str = "04b754ba2a3da0970d72d08b8740fb2ad96e63cf8f8bef6b7f1ab84e5b09a7f8@67.211.219.34:31001";
         
         // Combine hardcoded peer with configured peers
         let mut all_peers: Vec<String> = vec![HARDCODED_BOOTSTRAP.to_string()];
@@ -521,25 +539,69 @@ impl IrohNetwork {
                 }
             }).count();
             
-            let has_any_connection = active_peer_count > 0 || connected_bootstrap_count > 0;
-            
-            if has_any_connection {
+            // If we have ANY active peers or any connected bootstrap nodes, attempt
+            // to reconnect only the disconnected bootstrap peers instead of treating
+            // the node as isolated. This reduces reconnection blast and keeps
+            // bootstrap links resilient per-peer.
+            if active_peer_count > 0 || connected_bootstrap_count > 0 {
                 tracing::trace!("✓ Node has {} active peers, {} connected bootstrap nodes", 
                     active_peer_count, connected_bootstrap_count);
+
+                // For each bootstrap peer, if it's disconnected, spawn a reconnect task
+                for (node_id, socket_addr) in &bootstrap_peers {
+                    let endpoint_clone = endpoint.clone();
+                    let node_id_clone = *node_id;
+                    let socket_addr_clone = *socket_addr;
+                    let discovered_peers_clone = Arc::clone(&discovered_peers);
+
+                    // Check connection type; if disconnected, attempt reconnect
+                    let is_connected = if let Some(mut watcher) = endpoint.conn_type(*node_id) {
+                        use iroh::endpoint::ConnectionType;
+                        !matches!(watcher.get(), ConnectionType::None)
+                    } else {
+                        false
+                    };
+
+                    if !is_connected {
+                        tracing::warn!(%node_id_clone, "Bootstrap peer disconnected - attempting reconnect");
+                        tokio::spawn(async move {
+                            // Small delay to avoid immediate retry storms
+                            tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+                            match Self::connect_bootstrap_peer_with_retry(
+                                endpoint_clone,
+                                node_id_clone,
+                                socket_addr_clone,
+                            ).await {
+                                Ok(_) => {
+                                    tracing::info!("✅ Reconnected to bootstrap peer {}", node_id_clone.fmt_short());
+                                    discovered_peers_clone.insert(
+                                        node_id_clone,
+                                        (chrono::Utc::now(), Some(socket_addr_clone)),
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!("❌ Failed to reconnect to bootstrap peer {}: {}", node_id_clone.fmt_short(), e);
+                                }
+                            }
+                        });
+                    }
+                }
+
+                // Continue monitoring loop
                 continue;
             }
-            
-            // Node is ISOLATED - reconnect to all bootstrap peers
+
+            // Node is fully isolated - reconnect to all bootstrap peers
             tracing::warn!("⚠️  Node is ISOLATED (0 active peers, 0 bootstrap connections) - reconnecting to bootstrap nodes");
-            
+
             for (node_id, socket_addr) in &bootstrap_peers {
                 tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
-                
+
                 let endpoint_clone = endpoint.clone();
                 let node_id_clone = *node_id;
                 let socket_addr_clone = *socket_addr;
                 let discovered_peers_clone = Arc::clone(&discovered_peers);
-                
+
                 tokio::spawn(async move {
                     match Self::connect_bootstrap_peer_with_retry(
                         endpoint_clone,
@@ -619,6 +681,8 @@ impl IrohNetwork {
                 if use_relay { " [with relay fallback]" } else { "" }
             );
             
+            // Metric: record connection attempt
+            crate::metrics::PEER_CONNECTIONS_TOTAL.inc();
             match endpoint.connect(endpoint_addr, iroh_gossip::ALPN).await {
                 Ok(_conn) => {
                     tracing::info!(
@@ -632,6 +696,7 @@ impl IrohNetwork {
                 }
                 Err(e) => {
                     if attempt >= MAX_RETRIES {
+                        crate::metrics::PEER_CONNECTION_FAILURES.inc();
                         tracing::error!(
                             "❌ Failed to connect to bootstrap peer {} at {} after {} attempts: {}",
                             node_id.fmt_short(),
@@ -730,6 +795,45 @@ impl IrohNetwork {
         let improved_peers_ref = Arc::clone(&improved_receiver.neighbor_map);
         self.improved_discovery_peers = improved_peers_ref;
 
+        // Start cleanup task for `discovered_peers` to avoid unbounded growth.
+        // Mirrors behavior of `DiscoveryReceiver::start_cleanup_task` and
+        // removes entries older than `DISCOVERED_PEER_EXPIRY_SECS`.
+        {
+            let discovered_peers = Arc::clone(&self.discovered_peers);
+            const DISCOVERED_PEER_EXPIRY_SECS: i64 = 300; // 5 minutes
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let now = chrono::Utc::now();
+                    let expired: Vec<EndpointId> = discovered_peers
+                        .iter()
+                        .filter_map(|entry| {
+                            if now.signed_duration_since(entry.value().0).num_seconds() > DISCOVERED_PEER_EXPIRY_SECS {
+                                Some(*entry.key())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    let mut removed = 0;
+                    for peer_id in expired {
+                        if discovered_peers.remove(&peer_id).is_some() {
+                            removed += 1;
+                            crate::metrics::PEER_EXPIRATIONS.inc();
+                            tracing::info!(%peer_id, "Cleanup: removed expired discovered peer");
+                        }
+                    }
+
+                    if removed > 0 {
+                        tracing::debug!(count = removed, "Removed expired discovered peers");
+                    }
+                    crate::metrics::NETWORK_PEERS.set(discovered_peers.len() as i64);
+                }
+            });
+        }
+
         // Wait for peers to join before starting broadcasts (following iroh-gossip best practices)
         if !bootstrap_peers.is_empty() {
             tracing::info!("Waiting for peers to join gossip network...");
@@ -776,6 +880,8 @@ impl IrohNetwork {
         
         // Task 2: Sync discovered peers from neighbor_map to discovered_peers
         // This bridges the gap between the gossip discovery module and the main peer tracking
+        let resilience_ref = self.resilience.clone();
+        let peer_backoff = Arc::clone(&self.peer_backoff);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
             const MAX_CONNECTIONS_PER_CYCLE: usize = 3; // Limit connection attempts per cycle
@@ -802,29 +908,62 @@ impl IrohNetwork {
                     
                     connections_this_cycle += 1;
                     
-                    // Try to connect to the discovered peer
-                    tracing::info!(
-                        "🔗 Discovery found new peer: {} ({}), attempting connection...",
-                        peer_info.name,
-                        peer_id
-                    );
-                    
-                    match endpoint_for_improved.connect(peer_id, iroh_gossip::ALPN).await {
-                        Ok(_conn) => {
-                            improved_discovered_peers.insert(peer_id, (chrono::Utc::now(), None));
-                            tracing::info!(
-                                "✓ Connected to peer: {} (region: {})",
-                                peer_info.name,
-                                peer_info.region
-                            );
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                "Failed to connect to peer {}: {}",
-                                peer_id, e
-                            );
+                            // Check resilience gate (circuit breaker / reputation) if attached
+                            if let Some(res) = &resilience_ref {
+                                if !res.should_communicate(peer_id) {
+                                    tracing::debug!(%peer_id, "Skipping connect due to resilience gate");
+                                    continue;
+                                }
+                            }
+
+                    // Check per-peer backoff
+                    let now = chrono::Utc::now();
+                    if let Some(back) = peer_backoff.get(&peer_id) {
+                        let (_fails, next_allowed) = *back.value();
+                        if now < next_allowed {
+                            tracing::debug!(%peer_id, next_allowed=%next_allowed, "Skipping connect due to backoff");
+                            continue;
                         }
                     }
+
+                            // Try to connect to the discovered peer
+                            tracing::info!(
+                                "🔗 Discovery found new peer: {} ({}), attempting connection...",
+                                peer_info.name,
+                                peer_id
+                            );
+
+                            // Metric: record connection attempt from discovery
+                            crate::metrics::PEER_CONNECTIONS_TOTAL.inc();
+                            match endpoint_for_improved.connect(peer_id, iroh_gossip::ALPN).await {
+                    Ok(_conn) => {
+                        // Success: clear backoff state
+                        peer_backoff.remove(&peer_id);
+                        improved_discovered_peers.insert(peer_id, (chrono::Utc::now(), None));
+                        tracing::info!(
+                            "✓ Connected to peer: {} (region: {})",
+                            peer_info.name,
+                            peer_info.region
+                        );
+                    }
+                    Err(e) => {
+                        crate::metrics::PEER_CONNECTION_FAILURES.inc();
+                        tracing::debug!("Failed to connect to peer {}: {}", peer_id, e);
+
+                        // Update backoff state: exponential backoff
+                        let mut failures = 1u32;
+                        if let Some(mut entry) = peer_backoff.get_mut(&peer_id) {
+                            failures = entry.value_mut().0.saturating_add(1);
+                        }
+
+                        let base_secs = 2u64;
+                        let max_secs = 300u64; // 5 minutes
+                        let backoff_secs = (base_secs.checked_shl((failures - 1) as u32).unwrap_or(max_secs)).min(max_secs);
+                        let next_allowed = now + chrono::Duration::seconds(backoff_secs as i64);
+                        peer_backoff.insert(peer_id, (failures, next_allowed));
+                        tracing::info!(%peer_id, failures, %next_allowed, "Set backoff after failed connect");
+                    }
+                            }
                 }
             }
         });
@@ -1301,6 +1440,8 @@ impl IrohNetwork {
                                     }
                                     let peer_addr = EndpointAddr::from_parts(peer_id, addrs);
                                     
+                                    // Metric: record connection attempt (peer discovery announcement)
+                                    crate::metrics::PEER_CONNECTIONS_TOTAL.inc();
                                     match endpoint.connect(peer_addr, iroh_gossip::ALPN).await {
                                         Ok(_conn) => {
                                             discovered_peers.insert(peer_id, (chrono::Utc::now(), Some(socket_addr)));
@@ -1308,6 +1449,7 @@ impl IrohNetwork {
                                             tracing::info!("✓ Successfully connected to peer {} at {}", peer_id, socket_addr);
                                         }
                                         Err(e) => {
+                                            crate::metrics::PEER_CONNECTION_FAILURES.inc();
                                             tracing::debug!("Failed to connect to peer {} at {}: {}", peer_id, socket_addr, e);
                                         }
                                     }
@@ -1329,6 +1471,8 @@ impl IrohNetwork {
                                     tracing::info!("🔗 Attempting to connect to peer {} via DHT/relay (discovered via {})", 
                                         peer_id, announcement.node_id);
                                     
+                                    // Metric: record connection attempt (DHT/relay)
+                                    crate::metrics::PEER_CONNECTIONS_TOTAL.inc();
                                     match endpoint.connect(peer_id, iroh_gossip::ALPN).await {
                                         Ok(_conn) => {
                                             discovered_peers.insert(peer_id, (chrono::Utc::now(), None));
@@ -1336,6 +1480,7 @@ impl IrohNetwork {
                                             tracing::info!("✓ Successfully connected to peer {} via DHT/relay", peer_id);
                                         }
                                         Err(e) => {
+                                            crate::metrics::PEER_CONNECTION_FAILURES.inc();
                                             tracing::debug!("Failed to connect to peer {} via DHT: {}", peer_id, e);
                                         }
                                     }

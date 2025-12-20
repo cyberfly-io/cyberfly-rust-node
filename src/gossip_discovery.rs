@@ -18,6 +18,7 @@ use iroh_gossip::{
     proto::TopicId,
 };
 use serde::{Deserialize, Serialize};
+use rand::Rng;
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
@@ -297,7 +298,10 @@ impl DiscoverySender {
             }
 
             node.count += 1;
-            sleep(self.broadcast_interval).await;
+            // Add small randomized jitter to avoid synchronized broadcast storms
+            let jitter_ms: u64 = (rand::random::<u16>() as u64) % 1001; // up to 1s jitter
+            let sleep_dur = self.broadcast_interval + std::time::Duration::from_millis(jitter_ms);
+            sleep(sleep_dur).await;
         }
     }
 }
