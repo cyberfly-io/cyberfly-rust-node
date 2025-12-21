@@ -1798,11 +1798,41 @@ impl IrohNetwork {
             error: Option<String>,
         }
 
+        // First try to parse the incoming bytes as the expected SignedRequest.
+        // If that fails, some publishers wrap the SignedRequest inside our
+        // `GossipMessage` wrapper (with base64 payload). Try that as a fallback
+        // so we accept both raw SignedRequest and wrapped messages.
         let signed_request: SignedRequest = match serde_json::from_slice(&data) {
-            Ok(req) => req,
-            Err(e) => {
-                tracing::error!("Failed to parse latency request: {}", e);
-                return Err(anyhow::anyhow!("Invalid request format: {}", e));
+            Ok(req) => {
+                tracing::debug!("Parsed SignedRequest directly");
+                req
+            }
+            Err(orig_err) => {
+                tracing::debug!("Direct SignedRequest parse failed: {} - trying GossipMessage wrapper", orig_err);
+
+                // Try parsing as GossipMessage wrapper
+                match serde_json::from_slice::<GossipMessage>(&data) {
+                    Ok(gm) => {
+                        tracing::info!("Detected GossipMessage wrapper - extracting payload ({} bytes)", gm.payload.len());
+
+                        // The `payload` field is already bytes (base64 decoded by serde),
+                        // so try to parse SignedRequest from that payload.
+                        match serde_json::from_slice::<SignedRequest>(&gm.payload) {
+                            Ok(req) => {
+                                tracing::debug!("Parsed SignedRequest from GossipMessage.payload");
+                                req
+                            }
+                            Err(e2) => {
+                                tracing::error!("Failed to parse SignedRequest from GossipMessage.payload: {}", e2);
+                                return Err(anyhow::anyhow!("Invalid request format: {}", e2));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to parse latency request: {}", e);
+                        return Err(anyhow::anyhow!("Invalid request format: {}", e));
+                    }
+                }
             }
         };
 
