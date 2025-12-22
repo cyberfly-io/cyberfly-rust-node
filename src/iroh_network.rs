@@ -800,6 +800,8 @@ impl IrohNetwork {
         // removes entries older than `DISCOVERED_PEER_EXPIRY_SECS`.
         {
             let discovered_peers = Arc::clone(&self.discovered_peers);
+            // Protect configured bootstrap peers from being expired by cleanup
+            let bootstrap_protected = self.bootstrap_peers.clone();
             const DISCOVERED_PEER_EXPIRY_SECS: i64 = 300; // 5 minutes
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -809,8 +811,14 @@ impl IrohNetwork {
                     let expired: Vec<EndpointId> = discovered_peers
                         .iter()
                         .filter_map(|entry| {
+                            // Skip bootstrap-protected peers
+                            let peer_id = *entry.key();
+                            if bootstrap_protected.contains(&peer_id) {
+                                return None;
+                            }
+
                             if now.signed_duration_since(entry.value().0).num_seconds() > DISCOVERED_PEER_EXPIRY_SECS {
-                                Some(*entry.key())
+                                Some(peer_id)
                             } else {
                                 None
                             }
@@ -969,9 +977,9 @@ impl IrohNetwork {
         });
         tracing::info!("🚀 Started discovery receiver (ed25519 signature verification)");
 
-        // NOTE: Peer expiration is DISABLED - peers are never removed automatically
-        // Bootstrap connection monitor handles reconnection to maintain network connectivity
-        tracing::info!("✓ Peer expiration disabled - peers persist until node restart");
+        // NOTE: Peer expiration is ENABLED (cleanup every 60s, expiry 5m).
+        // Bootstrap peers are protected from automatic expiration.
+        tracing::info!("✓ Peer expiration enabled (5m); bootstrap peers protected from expiry");
 
         // Process inbound network events and route to SyncManager
         {
@@ -993,11 +1001,6 @@ impl IrohNetwork {
         
                     match evt {
                         NetworkEvent::Message { peer, data } => {
-                            // Ignore our own messages
-                            if peer == local_node_id {
-                                continue;
-                            }
-                            // Parse payload as SyncMessage
                             match serde_json::from_slice::<crate::sync::SyncMessage>(&data) {
                                 Ok(sync_msg) => {
                                     if let Some(manager) = sync_manager.as_ref() {
@@ -1269,8 +1272,12 @@ impl IrohNetwork {
                 GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::info!("Sync neighbor down: {}", peer_node_id);
                 
-                // Remove peer from discovered_peers to ensure accurate isolation detection
-                discovered_peers.remove(&peer_node_id);
+                // Don't remove immediately on transient NeighborDown events.
+                // Update last-seen timestamp and keep the peer in the map so
+                // the cleanup task can expire it gracefully if it truly disappears.
+                discovered_peers.entry(peer_node_id)
+                    .and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Sync gossip lagged - missed messages");
@@ -1318,7 +1325,10 @@ impl IrohNetwork {
             }
             GossipEvent::NeighborDown(peer_node_id) => {
                 tracing::debug!("Latency topic neighbor down: {}", peer_node_id);
-                // Don't remove from discovered_peers here - other topics may still have the peer
+                // Don't remove from discovered_peers here on transient neighbor down.
+                discovered_peers.entry(peer_node_id)
+                    .and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Latency gossip lagged - missed messages");
