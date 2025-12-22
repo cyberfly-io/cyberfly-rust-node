@@ -204,6 +204,387 @@ async fn download_model(
 }
 
 // ============================================================================
+// ImageNet Labels and Post-Processing
+// ============================================================================
+
+/// ImageNet 1000 class labels (index 0-999)
+/// Source: https://gist.githubusercontent.com/yrevar/942d3a0ac09ec9e5eb3a
+const IMAGENET_LABELS: &[&str] = &include!("../data/imagenet_labels.txt");
+
+/// Apply softmax to convert logits to probabilities
+fn softmax(logits: &[f32]) -> Vec<f32> {
+    // Find max for numerical stability
+    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    
+    // Compute exp(x - max) for each element
+    let exp_values: Vec<f32> = logits.iter()
+        .map(|&x| (x - max_logit).exp())
+        .collect();
+    
+    // Sum of all exp values
+    let sum: f32 = exp_values.iter().sum();
+    
+    // Normalize to get probabilities
+    exp_values.iter().map(|&x| x / sum).collect()
+}
+
+/// Check if output shape matches ImageNet classification (1000 or 1001 classes)
+fn is_imagenet_classification(shape: &[usize]) -> bool {
+    // Shape should be [1, N] or [N] where N is 1000 or 1001
+    match shape {
+        [1, n] | [n] if *n == 1000 || *n == 1001 => true,
+        _ => false,
+    }
+}
+
+/// Get top-K predictions from probabilities
+fn get_top_k_predictions(probabilities: &[f32], k: usize) -> Vec<(usize, f32)> {
+    let mut indexed: Vec<(usize, f32)> = probabilities.iter()
+        .enumerate()
+        .map(|(i, &p)| (i, p))
+        .collect();
+    
+    // Sort by probability descending
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    
+    // Take top K
+    indexed.into_iter().take(k).collect()
+}
+
+// ============================================================================
+// COCO Labels and Object Detection Post-Processing
+// ============================================================================
+
+/// COCO 80 class labels for object detection
+const COCO_LABELS: &[&str] = &[
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
+    "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
+    "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
+    "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
+    "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors",
+    "teddy bear", "hair drier", "toothbrush",
+];
+
+/// Check if output shape matches YOLOv8 detection format
+fn is_yolo_detection(shape: &[usize]) -> bool {
+    // YOLOv8 outputs: [1, 84, 8400] or [1, num_detections, 85]
+    match shape {
+        [1, 84, _] | [1, _, 85] | [1, _, 84] => true,
+        _ => false,
+    }
+}
+
+/// Bounding box with class and confidence
+#[derive(Debug, Clone, serde::Serialize)]
+struct Detection {
+    class: String,
+    class_id: usize,
+    confidence: f32,
+    bbox: [f32; 4], // [x, y, w, h]
+}
+
+/// Non-Maximum Suppression
+fn nms(detections: &mut Vec<Detection>, iou_threshold: f32) -> Vec<Detection> {
+    if detections.is_empty() {
+        return vec![];
+    }
+    
+    // Sort by confidence descending
+    detections.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    
+    let mut keep = vec![];
+    let mut suppressed = vec![false; detections.len()];
+    
+    for i in 0..detections.len() {
+        if suppressed[i] {
+            continue;
+        }
+        keep.push(detections[i].clone());
+        
+        for j in (i + 1)..detections.len() {
+            if suppressed[j] {
+                continue;
+            }
+            
+            // Calculate IoU
+            let iou = calculate_iou(&detections[i].bbox, &detections[j].bbox);
+            if iou > iou_threshold {
+                suppressed[j] = true;
+            }
+        }
+    }
+    
+    keep
+}
+
+/// Calculate Intersection over Union
+fn calculate_iou(box1: &[f32; 4], box2: &[f32; 4]) -> f32 {
+    let x1 = box1[0].max(box2[0]);
+    let y1 = box1[1].max(box2[1]);
+    let x2 = (box1[0] + box1[2]).min(box2[0] + box2[2]);
+    let y2 = (box1[1] + box1[3]).min(box2[1] + box2[3]);
+    
+    let intersection = (x2 - x1).max(0.0) * (y2 - y1).max(0.0);
+    let area1 = box1[2] * box1[3];
+    let area2 = box2[2] * box2[3];
+    let union = area1 + area2 - intersection;
+    
+    if union > 0.0 {
+        intersection / union
+    } else {
+        0.0
+    }
+}
+
+/// Process YOLOv8 output into detections
+fn process_yolo_output(output: &[f32], shape: &[usize], conf_threshold: f32) -> Vec<Detection> {
+    let mut detections = vec![];
+    
+    // YOLOv8 format: [1, 84, 8400] where 84 = 4 (bbox) + 80 (classes)
+    if let [1, 84, num_boxes] = shape {
+        for i in 0..*num_boxes {
+            // Extract bbox (first 4 values)
+            let x = output[i];
+            let y = output[num_boxes + i];
+            let w = output[2 * num_boxes + i];
+            let h = output[3 * num_boxes + i];
+            
+            // Find max class confidence
+            let mut max_conf = 0.0f32;
+            let mut max_class = 0;
+            
+            for c in 0..80 {
+                let conf = output[(4 + c) * num_boxes + i];
+                if conf > max_conf {
+                    max_conf = conf;
+                    max_class = c;
+                }
+            }
+            
+            if max_conf > conf_threshold {
+                let class_name = COCO_LABELS.get(max_class)
+                    .unwrap_or(&"unknown")
+                    .to_string();
+                
+                detections.push(Detection {
+                    class: class_name,
+                    class_id: max_class,
+                    confidence: max_conf,
+                    bbox: [x, y, w, h],
+                });
+            }
+        }
+    }
+    
+    detections
+}
+
+// ============================================================================
+// Segmentation and OCR Post-Processing
+// ============================================================================
+
+/// Common segmentation class labels (simplified ADE20K subset)
+const SEGMENTATION_LABELS: &[&str] = &[
+    "background", "wall", "building", "sky", "floor", "tree", "ceiling", "road", "bed", "window",
+    "grass", "cabinet", "sidewalk", "person", "earth", "door", "table", "mountain", "plant",
+    "curtain", "chair", "car", "water", "painting", "sofa", "shelf", "house", "sea", "mirror",
+    "rug", "field", "armchair", "seat", "fence", "desk", "rock", "wardrobe", "lamp", "bathtub",
+];
+
+/// Check if output shape matches segmentation format
+fn is_segmentation(shape: &[usize]) -> bool {
+    // Segmentation outputs: [1, num_classes, H, W] or [1, H, W, num_classes]
+    match shape {
+        [1, c, h, w] if *c < 200 && *h > *c && *w > *c => true,
+        [1, h, w, c] if *c < 200 && *h > *c && *w > *c => true,
+        _ => false,
+    }
+}
+
+/// Check if output looks like OCR/text embeddings
+fn is_ocr_output(shape: &[usize]) -> bool {
+    // OCR outputs are typically [1, seq_len, vocab_size] or [batch, seq_len]
+    match shape {
+        [1, seq_len, vocab] if *seq_len > 1 && *vocab > 30 => true,
+        [_, seq_len] if *seq_len > 1 => true,
+        _ => false,
+    }
+}
+
+/// Process segmentation output
+fn process_segmentation_output(output: &[f32], shape: &[usize]) -> serde_json::Value {
+    let (num_classes, height, width) = match shape {
+        [1, c, h, w] => (*c, *h, *w),
+        [1, h, w, c] => (*c, *h, *w),
+        _ => return serde_json::json!({"error": "Invalid segmentation shape"}),
+    };
+    
+    // Find unique classes present in the segmentation
+    let mut classes_present = std::collections::HashSet::new();
+    
+    // Sample the segmentation mask (don't process every pixel for efficiency)
+    let sample_rate = (height * width / 1000).max(1);
+    for i in (0..output.len()).step_by(sample_rate) {
+        let class_id = (output[i] as usize).min(num_classes - 1);
+        classes_present.insert(class_id);
+    }
+    
+    let classes_detected: Vec<String> = classes_present
+        .iter()
+        .map(|&id| {
+            SEGMENTATION_LABELS.get(id)
+                .unwrap_or(&"unknown")
+                .to_string()
+        })
+        .collect();
+    
+    serde_json::json!({
+        "type": "segmentation",
+        "num_classes": num_classes,
+        "mask_shape": [height, width],
+        "classes_detected": classes_detected,
+        "note": "Full segmentation mask available in raw output"
+    })
+}
+
+/// Process OCR output (simplified - assumes character-level decoding)
+fn process_ocr_output(output: &[f32], shape: &[usize]) -> serde_json::Value {
+    // Simplified OCR decoding - in production, use proper CTC/attention decoding
+    let text = match shape {
+        [1, seq_len, _vocab] => {
+            // Take argmax over vocab dimension
+            let mut chars = Vec::new();
+            for i in 0..*seq_len {
+                let start_idx = i * shape[2];
+                let end_idx = start_idx + shape[2];
+                if end_idx <= output.len() {
+                    let slice = &output[start_idx..end_idx];
+                    let max_idx = slice.iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(0);
+                    
+                    // Simple ASCII mapping (very simplified)
+                    if max_idx > 0 && max_idx < 128 {
+                        chars.push(max_idx as u8 as char);
+                    }
+                }
+            }
+            chars.into_iter().collect::<String>().trim().to_string()
+        }
+        _ => "Unable to decode text".to_string(),
+    };
+    
+    serde_json::json!({
+        "type": "ocr",
+        "text": text,
+        "note": "Simplified decoding - production should use CTC/attention decoder"
+    })
+}
+
+
+// ============================================================================
+// Audio Post-Processing (VAD and Denoising)
+// ============================================================================
+
+/// Check if output is Voice Activity Detection (VAD)
+fn is_vad_output(shape: &[usize]) -> bool {
+    // VAD outputs: [1, T] where T is time steps
+    match shape {
+        [1, t] if *t > 10 => true,
+        [t] if *t > 10 => true,
+        _ => false,
+    }
+}
+
+/// Check if output is audio waveform (denoising)
+fn is_audio_output(shape: &[usize]) -> bool {
+    // Audio outputs: [1, samples] or [samples] where samples is large
+    match shape {
+        [1, s] if *s > 1000 => true,
+        [s] if *s > 1000 => true,
+        _ => false,
+    }
+}
+
+/// Process VAD output
+fn process_vad_output(output: &[f32], shape: &[usize]) -> serde_json::Value {
+    let num_frames = match shape {
+        [1, t] => *t,
+        [t] => *t,
+        _ => return serde_json::json!({"error": "Invalid VAD shape"}),
+    };
+    
+    // Calculate average speech probability
+    let avg_prob: f32 = output.iter().sum::<f32>() / num_frames as f32;
+    let speech_detected = avg_prob > 0.5;
+    
+    // Find speech segments (simplified - threshold at 0.5)
+    let mut segments = Vec::new();
+    let mut in_speech = false;
+    let mut start_frame = 0;
+    
+    for (i, &prob) in output.iter().enumerate() {
+        if prob > 0.5 && !in_speech {
+            start_frame = i;
+            in_speech = true;
+        } else if prob <= 0.5 && in_speech {
+            // Assume 10ms per frame (typical for VAD)
+            let start_time = start_frame as f32 * 0.01;
+            let end_time = i as f32 * 0.01;
+            segments.push([start_time, end_time]);
+            in_speech = false;
+        }
+    }
+    
+    // Close final segment if still in speech
+    if in_speech {
+        let start_time = start_frame as f32 * 0.01;
+        let end_time = num_frames as f32 * 0.01;
+        segments.push([start_time, end_time]);
+    }
+    
+    serde_json::json!({
+        "type": "vad",
+        "speech_probability": avg_prob,
+        "speech_detected": speech_detected,
+        "num_segments": segments.len(),
+        "segments": segments,
+        "duration_seconds": num_frames as f32 * 0.01
+    })
+}
+
+/// Process audio denoising output
+fn process_audio_output(output: &[f32], shape: &[usize]) -> serde_json::Value {
+    let num_samples = match shape {
+        [1, s] => *s,
+        [s] => *s,
+        _ => return serde_json::json!({"error": "Invalid audio shape"}),
+    };
+    
+    // Assume 16kHz sample rate (common for speech)
+    let sample_rate = 16000;
+    let duration_seconds = num_samples as f32 / sample_rate as f32;
+    
+    // Calculate RMS energy
+    let rms = (output.iter().map(|&x| x * x).sum::<f32>() / num_samples as f32).sqrt();
+    
+    serde_json::json!({
+        "type": "audio_denoising",
+        "num_samples": num_samples,
+        "sample_rate": sample_rate,
+        "duration_seconds": duration_seconds,
+        "rms_energy": rms,
+        "note": "Denoised audio available in raw output"
+    })
+}
+
+// ============================================================================
 // Data Models
 // ============================================================================
 
@@ -392,6 +773,59 @@ impl InferenceResult {
             completed_at: chrono::Utc::now().timestamp_millis(),
             success: false,
             error: Some(error),
+        }
+    }
+}
+
+/// File metadata for inference outputs that are files
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileMetadata {
+    /// Original filename or generated name
+    pub filename: String,
+    /// MIME type of the file
+    pub mime_type: String,
+    /// Size in bytes
+    pub size_bytes: u64,
+}
+
+/// Metadata for stored inference results
+///
+/// Stored in blob storage with key `result:{job_id}` for persistent retrieval
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceResultMetadata {
+    /// Job ID
+    pub job_id: String,
+    /// Type of output: "json" or "file"
+    pub output_type: String,
+    /// Blob hash of the output data
+    pub output_blob_hash: String,
+    /// File metadata if output_type is "file"
+    pub file_metadata: Option<FileMetadata>,
+    /// Unix timestamp when completed
+    pub completed_at: i64,
+    /// Whether execution was successful
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+    /// Execution latency in milliseconds
+    pub latency_ms: u64,
+    /// Node that executed the job
+    pub node_id: String,
+}
+
+impl InferenceResultMetadata {
+    /// Create metadata from InferenceResult
+    pub fn from_result(result: &InferenceResult, output_type: String, output_blob_hash: String) -> Self {
+        Self {
+            job_id: result.job_id.clone(),
+            output_type,
+            output_blob_hash,
+            file_metadata: None,
+            completed_at: result.completed_at,
+            success: result.success,
+            error: result.error.clone(),
+            latency_ms: result.latency_ms,
+            node_id: result.node_id.clone(),
         }
     }
 }
@@ -793,7 +1227,7 @@ pub mod worker {
 
             // Placeholder: In production, use tflite-rs or tract here
             // For now, simulate inference with a small delay
-            let execution_result = self.execute_tflite_inference(&model_path, &job.input_uri).await;
+            let execution_result = self.execute_tflite_inference(&model_path, &job.input_uri, job).await;
 
             let latency_ms = start.elapsed().as_millis() as u64;
 
@@ -835,6 +1269,7 @@ pub mod worker {
             &self,
             model_path: &PathBuf,
             input_uri: &str,
+            job: &InferenceJob,
         ) -> Result<String> {
             use tract_onnx::prelude::*;
             
@@ -916,8 +1351,16 @@ pub mod worker {
                 self.process_outputs(&outputs)?
             };
 
-            // Store result async
-            let output_uri = self.store_blob(output_json).await?;
+            // Create a temporary result for metadata storage
+            let temp_result = InferenceResult::success(
+                job.job_id.clone(),
+                self.node_id,
+                String::new(), // Will be filled with actual URI
+                0, // Latency will be updated by caller
+            );
+
+            // Store result with metadata
+            let output_uri = self.store_blob_with_metadata(&job.job_id, output_json, &temp_result).await?;
             
             info!(
                 model_path = %model_path.display(),
@@ -1000,11 +1443,110 @@ pub mod worker {
         /// Convert output tensor(s) to JSON string (Sync)
         ///
         /// This must be synchronous to avoid holding Rc<Tensor> (non-Send) across await points.
+        /// For classification models (ImageNet), applies softmax and returns labeled predictions.
         fn process_outputs(
             &self,
             outputs: &tract_onnx::prelude::TVec<tract_onnx::prelude::TValue>,
         ) -> Result<String> {
-            // Serialize output tensors to JSON
+            // Check if this is an ImageNet classification model
+            let first_output = outputs.get(0).ok_or_else(|| {
+                InferenceError::ExecutionFailed("No output tensors".to_string())
+            })?;
+            
+            // Try to get f32 array view
+            if let Ok(arr) = first_output.to_array_view::<f32>() {
+                let shape: Vec<usize> = arr.shape().to_vec();
+                let values: Vec<f32> = arr.iter().cloned().collect();
+                
+                // Check if this is YOLO object detection output
+                if is_yolo_detection(&shape) {
+                    // Process YOLO detections
+                    let mut detections = process_yolo_output(&values, &shape, 0.25); // conf_threshold = 0.25
+                    
+                    // Apply NMS
+                    let detections = nms(&mut detections, 0.45); // iou_threshold = 0.45
+                    
+                    // Build structured detection result
+                    let mut result = serde_json::Map::new();
+                    result.insert("type".to_string(), serde_json::json!("object_detection"));
+                    result.insert("num_detections".to_string(), serde_json::json!(detections.len()));
+                    result.insert("detections".to_string(), serde_json::json!(detections));
+                    
+                    return serde_json::to_string(&result)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
+                }
+                
+                // Check if this is segmentation output
+                if is_segmentation(&shape) {
+                    let result = process_segmentation_output(&values, &shape);
+                    return serde_json::to_string(&result)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
+                }
+                
+                // Check if this is OCR output
+                if is_ocr_output(&shape) {
+                    let result = process_ocr_output(&values, &shape);
+                    return serde_json::to_string(&result)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
+                }
+                
+                // Check if this is VAD output
+                if is_vad_output(&shape) {
+                    let result = process_vad_output(&values, &shape);
+                    return serde_json::to_string(&result)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
+                }
+                
+                // Check if this is audio denoising output
+                if is_audio_output(&shape) {
+                    let result = process_audio_output(&values, &shape);
+                    return serde_json::to_string(&result)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
+                }
+                
+                // Check if this is ImageNet classification output
+                if is_imagenet_classification(&shape) {
+                    // Apply softmax to convert logits to probabilities
+                    let probabilities = softmax(&values);
+                    
+                    // Get top-5 predictions
+                    let top_5 = get_top_k_predictions(&probabilities, 5);
+                    
+                    // Build structured classification result
+                    let mut result = serde_json::Map::new();
+                    result.insert("type".to_string(), serde_json::json!("classification"));
+                    
+                    // Top-1 prediction
+                    if let Some((class_id, confidence)) = top_5.first() {
+                        let label = IMAGENET_LABELS.get(*class_id)
+                            .unwrap_or(&"unknown")
+                            .to_string();
+                        result.insert("top_1".to_string(), serde_json::json!({
+                            "label": label,
+                            "class_id": class_id,
+                            "confidence": confidence
+                        }));
+                    }
+                    
+                    // Top-5 predictions
+                    let top_5_json: Vec<serde_json::Value> = top_5.iter().map(|(class_id, confidence)| {
+                        let label = IMAGENET_LABELS.get(*class_id)
+                            .unwrap_or(&"unknown")
+                            .to_string();
+                        serde_json::json!({
+                            "label": label,
+                            "class_id": class_id,
+                            "confidence": confidence
+                        })
+                    }).collect();
+                    result.insert("top_5".to_string(), serde_json::json!(top_5_json));
+                    
+                    return serde_json::to_string(&result)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
+                }
+            }
+            
+            // Fallback: serialize raw output tensors to JSON (for non-classification models)
             let mut output_data = serde_json::Map::new();
             
             for (i, output) in outputs.iter().enumerate() {
@@ -1036,7 +1578,54 @@ pub mod worker {
                 .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)))
         }
 
+        /// Store output JSON as blob and metadata (Async)
+        ///
+        /// Stores both the output data and metadata for retrieval by job ID
+        async fn store_blob_with_metadata(
+            &self,
+            job_id: &str,
+            output_json: String,
+            result: &InferenceResult,
+        ) -> Result<String> {
+            // Store output as Iroh blob and return hash URI for download
+            let output_bytes = output_json.as_bytes().to_vec();
+            let blobs = self.blob_store.blobs();
+            let tag = blobs.add_bytes(output_bytes.clone()).await
+                .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to store output blob: {}", e)))?;
+            
+            let blob_hash = tag.hash.to_string();
+            let output_uri = format!("blob://{}", blob_hash);
+            
+            // Create metadata
+            let metadata = InferenceResultMetadata::from_result(
+                result,
+                "json".to_string(),
+                blob_hash.clone(),
+            );
+            
+            // Store metadata with key result:{job_id}
+            let metadata_json = serde_json::to_string(&metadata)
+                .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to serialize metadata: {}", e)))?;
+            let metadata_bytes = metadata_json.as_bytes().to_vec();
+            
+            // Store metadata blob
+            let metadata_tag = blobs.add_bytes(metadata_bytes).await
+                .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to store metadata blob: {}", e)))?;
+            
+            info!(
+                job_id = %job_id,
+                output_size = output_bytes.len(),
+                blob_hash = %blob_hash,
+                metadata_hash = %metadata_tag.hash,
+                output_uri = %output_uri,
+                "Inference output and metadata stored as blobs"
+            );
+            
+            Ok(output_uri)
+        }
+
         /// Store output JSON as blob and return URI (Async)
+        /// Legacy method - prefer store_blob_with_metadata
         async fn store_blob(&self, output_json: String) -> Result<String> {
             // Store output as Iroh blob and return hash URI for download
             let output_bytes = output_json.as_bytes().to_vec();

@@ -306,6 +306,29 @@ pub struct InferenceJobInput {
     pub max_latency_ms: Option<i64>,
 }
 
+/// File metadata for inference outputs
+#[derive(SimpleObject, Clone)]
+pub struct FileMetadataGql {
+    pub filename: String,
+    pub mime_type: String,
+    pub size_bytes: i64,
+}
+
+/// Complete inference result metadata
+#[derive(SimpleObject, Clone)]
+pub struct InferenceResultMetadataGql {
+    pub job_id: String,
+    pub output_type: String,
+    pub output_blob_hash: String,
+    pub file_metadata: Option<FileMetadataGql>,
+    pub completed_at: String,
+    pub success: bool,
+    pub error: Option<String>,
+    pub latency_ms: i64,
+    pub node_id: String,
+}
+
+
 #[derive(SimpleObject, Clone)]
 pub struct JsonWithMeta {
     pub key: String,
@@ -2345,6 +2368,46 @@ impl QueryRoot {
         Ok(None)
     }
 
+    /// Get inference result metadata by job ID
+    async fn get_inference_result_metadata(
+        &self,
+        ctx: &Context<'_>,
+        job_id: String,
+    ) -> Result<Option<InferenceResultMetadataGql>, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_inference_result"]).inc();
+        
+        let scheduler = ctx
+            .data::<std::sync::Arc<crate::inference::InferenceScheduler>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_inference_result"]).inc();
+                DbError::InternalError("InferenceScheduler not available".to_string())
+            })?;
+
+        if let Some(result) = scheduler.get_result(&job_id) {
+            // Extract blob hash from output_uri (format: "blob://{hash}")
+            let output_blob_hash = result.output_uri
+                .strip_prefix("blob://")
+                .unwrap_or(&result.output_uri)
+                .to_string();
+            
+            return Ok(Some(InferenceResultMetadataGql {
+                job_id: result.job_id,
+                output_type: "json".to_string(), // Currently all outputs are JSON
+                output_blob_hash,
+                file_metadata: None, // Not yet implemented
+                completed_at: result.completed_at.to_string(),
+                success: result.success,
+                error: result.error,
+                latency_ms: result.latency_ms as i64,
+                node_id: result.node_id,
+            }));
+        }
+
+        Ok(None)
+    }
+
     /// Get inference result by job ID
     async fn get_inference_result(
         &self,
@@ -3411,6 +3474,7 @@ pub async fn create_server(
         .route("/graphql/schema.graphql", get(graphql_schema_handler))
         // Blob upload and download endpoints
         .route("/blobs/upload", post(blob_upload_handler))
+        .route("/blobs/upload/", post(blob_upload_handler))
         .route("/blobs/{hash}", get(blob_download_handler))
         .layer(cors)
         .layer(TraceLayer::new_for_http())  // Add request tracing
