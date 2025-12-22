@@ -711,6 +711,17 @@ pub mod scheduler {
         pub fn capabilities(&self) -> &InferenceCapabilities {
             &self.local_capabilities
         }
+
+        /// Get a job by ID (checking running then pending)
+        pub fn get_job(&self, job_id: &str) -> Option<InferenceJob> {
+            if let Some(entry) = self.running_jobs.get(job_id) {
+                return Some(entry.value().0.clone());
+            }
+            if let Some(entry) = self.pending_jobs.get(job_id) {
+                return Some(entry.value().clone());
+            }
+            None
+        }
     }
 }
 

@@ -2296,6 +2296,86 @@ impl QueryRoot {
             graphql_errors: get_graphql_counter("graphql_errors_total"),
         })
     }
+    // ============ Inference Queries ============
+
+    /// Get inference job details by ID
+    async fn get_inference_job(
+        &self,
+        ctx: &Context<'_>,
+        job_id: String,
+    ) -> Result<Option<InferenceJobGql>, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_inference_job"]).inc();
+        
+        // Access ApiSchema first if needed, or directly check if scheduler is available
+        let scheduler = ctx
+            .data::<std::sync::Arc<crate::inference::InferenceScheduler>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_inference_job"]).inc();
+                DbError::InternalError("InferenceScheduler not available".to_string())
+            })?;
+
+        if let Some(job) = scheduler.get_job(&job_id) {
+            return Ok(Some(InferenceJobGql {
+                job_id: job.job_id,
+                model_name: job.model_name,
+                input_uri: job.input_uri,
+                max_latency_ms: job.max_latency_ms as i64,
+                status: format!("{:?}", job.status),
+                created_at: job.created_at.to_string(),
+                requester: job.requester,
+            }));
+        }
+        
+        // Note: Completed jobs are moved to results, but original job details might be gone
+        // unless archived. For now, if we have a result, we can reconstruct partial job info.
+        if let Some(result) = scheduler.get_result(&job_id) {
+             return Ok(Some(InferenceJobGql {
+                job_id: result.job_id.clone(),
+                model_name: "unknown".to_string(), // We don't store model name in result
+                input_uri: "unknown".to_string(),
+                max_latency_ms: 0,
+                status: "Completed".to_string(),
+                created_at: result.completed_at.to_string(), // Approx
+                requester: "unknown".to_string(),
+            }));
+        }
+
+        Ok(None)
+    }
+
+    /// Get inference result by job ID
+    async fn get_inference_result(
+        &self,
+        ctx: &Context<'_>,
+        job_id: String,
+    ) -> Result<Option<InferenceResultGql>, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_inference_result"]).inc();
+        
+        let scheduler = ctx
+            .data::<std::sync::Arc<crate::inference::InferenceScheduler>>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["get_inference_result"]).inc();
+                DbError::InternalError("InferenceScheduler not available".to_string())
+            })?;
+
+        if let Some(result) = scheduler.get_result(&job_id) {
+            Ok(Some(InferenceResultGql {
+                job_id: result.job_id,
+                node_id: result.node_id,
+                output_uri: result.output_uri,
+                latency_ms: result.latency_ms as i64,
+                completed_at: result.completed_at.to_string(),
+                success: result.success,
+                error: result.error,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 pub struct MutationRoot;
@@ -2968,12 +3048,17 @@ impl MutationRoot {
         // Track metrics
         metrics::INFERENCE_JOBS_PENDING.inc();
         
-        // Note: Full integration requires adding InferenceScheduler to GraphQL context
-        // and broadcasting the job via inference_jobs_sender. For now, job is logged
-        // and tracked in metrics. The scheduler integration can be added by:
-        // 1. Adding `inference_scheduler: Option<Arc<InferenceScheduler>>` to create_server
-        // 2. Calling scheduler.add_job(job).await here
-        // 3. Broadcasting via the inference_jobs gossip topic
+        // Submit to scheduler if available
+        if let Ok(scheduler) = ctx.data::<std::sync::Arc<crate::inference::InferenceScheduler>>() {
+             scheduler.add_job(job.clone()).await.map_err(|e| {
+                 DbError::InternalError(format!("Failed to add job to scheduler: {}", e))
+             })?;
+             
+             // Broadcast via gossip would happen here or via scheduler hook
+             // For now, local submission is verified
+        } else {
+            tracing::warn!("InferenceScheduler not available in context, job locally created but not scheduled");
+        }
         
         Ok(InferenceJobSubmitResult {
             success: true,
@@ -3226,6 +3311,7 @@ pub async fn create_server(
     mqtt_store: Option<crate::mqtt_bridge::MqttMessageStore>,
     message_broadcast: Option<broadcast::Sender<MessageEvent>>,
     sync_outbound: Option<tokio::sync::mpsc::UnboundedSender<crate::sync::SyncMessage>>,
+    inference_scheduler: Option<Arc<crate::inference::InferenceScheduler>>,
 ) -> Result<Router> {
     // Initialize start time when server is created (not on first request)
     let _ = get_start_time();
@@ -3292,6 +3378,11 @@ pub async fn create_server(
     // Add outbound sync sender for broadcasting operations
     if let Some(tx) = sync_outbound {
         schema_builder = schema_builder.data(tx);
+    }
+
+    // Add InferenceScheduler if available
+    if let Some(scheduler) = inference_scheduler {
+        schema_builder = schema_builder.data(scheduler);
     }
 
     let schema = schema_builder.finish();

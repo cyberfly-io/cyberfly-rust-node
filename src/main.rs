@@ -678,6 +678,7 @@ async fn main() -> Result<()> {
         mqtt_store,
         Some(message_broadcast_tx.clone()),
         Some(sync_out_tx.clone()),
+        Some(inference_scheduler),
     )
     .await?;
     tracing::info!("GraphQL server initialized with WebSocket subscription support");
