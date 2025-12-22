@@ -53,6 +53,14 @@ pub struct NodeCapabilities {
     pub timeseries: bool,
     pub geo: bool,
     pub blobs: bool,
+    /// TFLite inference support
+    pub tflite: bool,
+    /// ONNX Runtime inference support
+    pub onnx: bool,
+    /// Number of CPU cores available
+    pub cpu_cores: u32,
+    /// Available RAM in megabytes
+    pub ram_mb: u64,
 }
 
 /// Tracked peer information

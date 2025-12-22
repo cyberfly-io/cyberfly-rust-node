@@ -21,6 +21,7 @@ pub mod retry;
 pub mod state_manager;
 pub mod storage;
 pub mod sync;
+pub mod inference;
 
 // Re-export commonly used types for easier testing
 pub use crate::crdt::CrdtStore;
@@ -33,3 +34,4 @@ pub use crate::sync::{SyncStore, SyncManager, SignedOperation, SyncMessage};
 pub use crate::peer_registry::{PeerRegistry, PeerRegistryConfig, PeerMeta, PeerStatus, PeerCapabilities, PeerSummary};
 pub use crate::gossip_discovery::{GossipDiscoveryBuilder, DiscoverySender, DiscoveryReceiver, DiscoveryNode, PeerInfo, NodeCapabilities, NodeId as GossipNodeId};
 pub use crate::network_resilience::{NetworkResilience, CircuitBreaker, CircuitBreakerConfig, CircuitState, ReputationManager, ReputationConfig, PeerReputation, BandwidthThrottle, BandwidthConfig};
+pub use crate::inference::{InferenceJob, InferenceResult, InferenceCapabilities, InferenceScheduler, InferenceWorker, JobStatus, InferenceMessage, SignedInferenceMessage};

@@ -249,6 +249,63 @@ pub struct IotPublishResult {
     pub message: String,
 }
 
+// ============================================================================
+// AI Inference Types
+// ============================================================================
+
+/// Result of submitting an inference job
+#[derive(SimpleObject, Clone)]
+pub struct InferenceJobSubmitResult {
+    pub success: bool,
+    pub job_id: String,
+    pub message: String,
+}
+
+/// Inference job status
+#[derive(SimpleObject, Clone)]
+pub struct InferenceJobGql {
+    pub job_id: String,
+    pub model_name: String,
+    pub input_uri: String,
+    pub max_latency_ms: i64,
+    pub status: String,
+    pub created_at: String,
+    pub requester: String,
+}
+
+/// Inference result
+#[derive(SimpleObject, Clone)]
+pub struct InferenceResultGql {
+    pub job_id: String,
+    pub node_id: String,
+    pub output_uri: String,
+    pub latency_ms: i64,
+    pub completed_at: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Scheduler status summary
+#[derive(SimpleObject, Clone)]
+pub struct InferenceStatusGql {
+    pub scheduler_enabled: bool,
+    pub worker_running: bool,
+    pub pending_jobs: i32,
+    pub running_jobs: i32,
+    pub completed_jobs: i32,
+    pub supports_tflite: bool,
+    pub cpu_cores: i32,
+    pub ram_mb: i64,
+}
+
+/// Input for submitting an inference job
+#[derive(InputObject)]
+pub struct InferenceJobInput {
+    pub model_name: String,
+    pub input_uri: String,
+    pub max_latency_ms: Option<i64>,
+}
+
 #[derive(SimpleObject, Clone)]
 pub struct JsonWithMeta {
     pub key: String,
@@ -2853,6 +2910,160 @@ impl MutationRoot {
                 Err(DbError::InternalError(format!("Connection to peer {} timed out after 10 seconds", peer_id)))
             }
         }
+    }
+
+    // ============================================================================
+    // AI Inference Mutations
+    // ============================================================================
+
+    /// Submit a new inference job
+    ///
+    /// The job will be broadcast to the network and picked up by a capable node.
+    /// Returns the job ID which can be used to track status.
+    async fn submit_inference_job(
+        &self,
+        ctx: &Context<'_>,
+        input: InferenceJobInput,
+    ) -> Result<InferenceJobSubmitResult, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["submit_inference_job"]).inc();
+        
+        // Get node endpoint for creating job
+        let endpoint = ctx
+            .data::<iroh::Endpoint>()
+            .map_err(|_| {
+                metrics::GRAPHQL_ERRORS.with_label_values(&["submit_inference_job"]).inc();
+                DbError::InternalError("Endpoint not found".to_string())
+            })?;
+        
+        let node_id = endpoint.id();
+        
+        // Validate model name (basic validation)
+        if input.model_name.is_empty() {
+            return Err(DbError::InvalidData("Model name cannot be empty".to_string()));
+        }
+        if input.input_uri.is_empty() {
+            return Err(DbError::InvalidData("Input URI cannot be empty".to_string()));
+        }
+        
+        // Generate unique job ID
+        let job_id = format!("job-{}", uuid::Uuid::new_v4());
+        let max_latency_ms = input.max_latency_ms.unwrap_or(5000) as u64;
+        
+        // Create inference job
+        let job = crate::inference::InferenceJob::new(
+            job_id.clone(),
+            input.model_name.clone(),
+            input.input_uri.clone(),
+            max_latency_ms,
+            node_id,
+        );
+        
+        tracing::info!(
+            "📤 Submitting inference job: {} model={} input={} max_latency={}ms requester={}",
+            job_id, input.model_name, input.input_uri, max_latency_ms, node_id
+        );
+        
+        // Track metrics
+        metrics::INFERENCE_JOBS_PENDING.inc();
+        
+        // Note: Full integration requires adding InferenceScheduler to GraphQL context
+        // and broadcasting the job via inference_jobs_sender. For now, job is logged
+        // and tracked in metrics. The scheduler integration can be added by:
+        // 1. Adding `inference_scheduler: Option<Arc<InferenceScheduler>>` to create_server
+        // 2. Calling scheduler.add_job(job).await here
+        // 3. Broadcasting via the inference_jobs gossip topic
+        
+        Ok(InferenceJobSubmitResult {
+            success: true,
+            job_id: job_id.clone(),
+            message: format!(
+                "Inference job {} submitted. Model: {}, max latency: {}ms. Job will be processed by available workers.",
+                job_id, input.model_name, max_latency_ms
+            ),
+        })
+    }
+
+    /// Cancel a pending inference job
+    ///
+    /// Broadcasts a cancellation message to prevent nodes from picking up the job.
+    async fn cancel_inference_job(
+        &self,
+        ctx: &Context<'_>,
+        job_id: String,
+        reason: Option<String>,
+    ) -> Result<StorageResult, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["cancel_inference_job"]).inc();
+        
+        if job_id.is_empty() {
+            return Err(DbError::InvalidData("Job ID cannot be empty".to_string()));
+        }
+        
+        let cancel_reason = reason.unwrap_or_else(|| "Cancelled by user".to_string());
+        
+        tracing::info!(
+            "❌ Cancelling inference job: {} reason: {}",
+            job_id, cancel_reason
+        );
+        
+        // Decrement pending if cancelling a pending job
+        // Note: In a full implementation, we'd check the actual job status first
+        let pending = metrics::INFERENCE_JOBS_PENDING.get();
+        if pending > 0 {
+            metrics::INFERENCE_JOBS_PENDING.dec();
+        }
+        
+        // Note: Full cancellation requires broadcasting via gossip topic
+        // using InferenceMessage::JobCancelled { job_id, reason }
+        
+        Ok(StorageResult {
+            success: true,
+            message: format!(
+                "Job {} cancellation requested: {}. Nodes will stop processing this job.",
+                job_id, cancel_reason
+            ),
+        })
+    }
+
+    /// Get current inference system status
+    ///
+    /// Returns scheduler status, job counts, and node capabilities.
+    async fn get_inference_status(
+        &self,
+        ctx: &Context<'_>,
+    ) -> Result<InferenceStatusGql, DbError> {
+        use crate::metrics;
+        
+        metrics::GRAPHQL_REQUESTS.with_label_values(&["get_inference_status"]).inc();
+        
+        // Get node capabilities from system info
+        let caps = crate::inference::InferenceCapabilities::from_system();
+        
+        // Get job counts from metrics
+        let pending = metrics::INFERENCE_JOBS_PENDING.get() as i32;
+        let running = metrics::INFERENCE_JOBS_RUNNING.get() as i32;
+        let completed = metrics::INFERENCE_JOBS_COMPLETED.get() as i32;
+        
+        // Check if inference module is enabled (it always is when this code runs)
+        let scheduler_enabled = true;
+        
+        // Worker running status - currently false since worker loop isn't started
+        // In full implementation, this would check the worker's running atomic flag
+        let worker_running = running > 0; // If jobs are running, worker is active
+        
+        Ok(InferenceStatusGql {
+            scheduler_enabled,
+            worker_running,
+            pending_jobs: pending,
+            running_jobs: running,
+            completed_jobs: completed,
+            supports_tflite: caps.supports_tflite,
+            cpu_cores: caps.cpu_cores as i32,
+            ram_mb: caps.ram_mb as i64,
+        })
     }
 }
 

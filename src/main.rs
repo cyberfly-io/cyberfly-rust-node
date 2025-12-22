@@ -16,6 +16,7 @@ mod peer_registry; // Centralized peer lifecycle management
 mod retry; // Enhanced retry and circuit breaker mechanisms
 mod storage;
 mod sync; // Data synchronization with CRDT
+mod inference; // AI inference execution
 
 // Use jemalloc on Linux for better multi-threaded allocation performance
 #[cfg(all(target_os = "linux", feature = "jemalloc"))]
@@ -158,6 +159,9 @@ async fn main() -> Result<()> {
     );
     let dht_discovery = DhtDiscovery::builder();
     let mdns = iroh::discovery::mdns::MdnsDiscovery::builder();
+
+    // Clone secret key for later use in inference worker (before it's consumed by endpoint builder)
+    let secret_key_clone = secret_key.clone();
 
     let endpoint = iroh::Endpoint::builder()
         .secret_key(secret_key)
@@ -350,6 +354,92 @@ async fn main() -> Result<()> {
     // Attach SyncManager to the network for inbound event handling
     network.attach_sync_manager(sync_manager.clone());
     tracing::info!("SyncManager attached to Iroh network for sync routing");
+
+    // Initialize InferenceScheduler for AI inference job coordination
+    let inference_capabilities = inference::InferenceCapabilities::from_system();
+    let inference_scheduler = std::sync::Arc::new(inference::InferenceScheduler::new(
+        node_id,
+        inference_capabilities.clone(),
+    ));
+    tracing::info!(
+        "🧠 InferenceScheduler initialized (tflite={}, cpu={}, ram={}MB)",
+        inference_capabilities.supports_tflite,
+        inference_capabilities.cpu_cores,
+        inference_capabilities.ram_mb
+    );
+
+    // Attach scheduler to network for receiving gossip jobs
+    network.attach_inference_scheduler(inference_scheduler.clone());
+    tracing::info!("InferenceScheduler attached to network for job routing");
+
+    // Create channel for worker to send results for gossip broadcast
+    let (inference_result_tx, mut inference_result_rx) = tokio::sync::mpsc::unbounded_channel::<inference::InferenceResult>();
+
+    // Get the inference jobs sender for broadcasting completed results
+    let inference_results_sender = network.inference_results_sender();
+
+    // Spawn inference result broadcaster (listens for worker results, broadcasts via gossip)
+    let scheduler_for_broadcaster = inference_scheduler.clone();
+    tokio::spawn(async move {
+        while let Some(result) = inference_result_rx.recv().await {
+            tracing::info!(
+                "📤 Broadcasting inference result: job={} latency={}ms success={}",
+                result.job_id, result.latency_ms, result.success
+            );
+            
+            // Sign and broadcast result
+            // Note: For now just log - full implementation needs SigningKey
+            // let signed = SignedInferenceMessage::sign_and_encode(&result, &signing_key);
+            // inference_results_sender.lock().await.broadcast(signed).await;
+            
+            // Update metrics
+            if result.success {
+                crate::metrics::INFERENCE_JOBS_COMPLETED.inc();
+                crate::metrics::INFERENCE_LATENCY_MS.observe(result.latency_ms as f64);
+            }
+        }
+    });
+
+    // Initialize models directory for TFLite models
+    let models_dir = data_dir.join("models");
+    tokio::fs::create_dir_all(&models_dir).await?;
+    tracing::info!("📁 Models directory: {:?}", models_dir);
+
+    // Download default models if not present
+    tracing::info!("🔍 Checking for default inference models...");
+    let model_results = inference::ensure_models_downloaded(&models_dir).await;
+    for (name, success, msg) in &model_results {
+        if *success {
+            tracing::info!("   ✓ {}: {}", name, msg);
+        } else {
+            tracing::warn!("   ✗ {}: {}", name, msg);
+        }
+    }
+    let downloaded_count = model_results.iter().filter(|(_, s, _)| *s).count();
+    tracing::info!("📦 {} inference models ready", downloaded_count);
+
+    // Initialize and start inference worker
+    // Convert iroh::SecretKey to ed25519_dalek::SigningKey
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_key_clone.to_bytes());
+    
+    let inference_worker = std::sync::Arc::new(inference::InferenceWorker::new(
+        models_dir.clone(),
+        node_id, // EndpointId is Copy
+        signing_key,
+        storage.inner_store(),
+    ));
+
+    let worker_scheduler = inference_scheduler.clone();
+    let worker_tx = inference_result_tx.clone();
+    let worker = inference_worker.clone();
+    
+    // Spawn worker task
+    tokio::spawn(async move {
+        tracing::info!("🧠 Starting inference worker loop...");
+        if let Err(e) = worker.run(worker_scheduler, worker_tx).await {
+            tracing::error!("❌ Inference worker failed: {}", e);
+        }
+    });
 
     // Initialize Kadena node registry if configured
     if let Some(kadena_config) = config.kadena_config.clone() {

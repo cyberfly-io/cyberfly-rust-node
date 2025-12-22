@@ -235,6 +235,43 @@ lazy_static! {
         "ttl_keys_scanned_last",
         "Number of keys scanned in the last TTL cleanup cycle"
     ).unwrap();
+
+    // ============================================================================
+    // Inference Metrics
+    // ============================================================================
+    
+    /// Number of pending inference jobs
+    pub static ref INFERENCE_JOBS_PENDING: IntGauge = IntGauge::new(
+        "inference_jobs_pending",
+        "Current number of pending inference jobs"
+    ).unwrap();
+    
+    /// Number of running inference jobs
+    pub static ref INFERENCE_JOBS_RUNNING: IntGauge = IntGauge::new(
+        "inference_jobs_running",
+        "Current number of running inference jobs"
+    ).unwrap();
+    
+    /// Total completed inference jobs
+    pub static ref INFERENCE_JOBS_COMPLETED: IntCounter = IntCounter::new(
+        "inference_jobs_completed_total",
+        "Total number of completed inference jobs"
+    ).unwrap();
+    
+    /// Total timed-out inference jobs
+    pub static ref INFERENCE_JOBS_TIMEOUTS: IntCounter = IntCounter::new(
+        "inference_jobs_timeouts_total",
+        "Total number of inference job timeouts"
+    ).unwrap();
+    
+    /// Inference execution latency in milliseconds
+    pub static ref INFERENCE_LATENCY_MS: Histogram = Histogram::with_opts(
+        HistogramOpts::new(
+            "inference_latency_ms",
+            "Inference execution latency in milliseconds"
+        )
+        .buckets(vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0])
+    ).unwrap();
 }
 
 /// Initialize metrics registry
@@ -294,6 +331,13 @@ pub fn init_metrics() {
     REGISTRY.register(Box::new(TTL_KEYS_EXPIRED.clone())).unwrap();
     REGISTRY.register(Box::new(TTL_CLEANUP_DURATION.clone())).unwrap();
     REGISTRY.register(Box::new(TTL_KEYS_SCANNED.clone())).unwrap();
+    
+    // Register inference metrics
+    REGISTRY.register(Box::new(INFERENCE_JOBS_PENDING.clone())).unwrap();
+    REGISTRY.register(Box::new(INFERENCE_JOBS_RUNNING.clone())).unwrap();
+    REGISTRY.register(Box::new(INFERENCE_JOBS_COMPLETED.clone())).unwrap();
+    REGISTRY.register(Box::new(INFERENCE_JOBS_TIMEOUTS.clone())).unwrap();
+    REGISTRY.register(Box::new(INFERENCE_LATENCY_MS.clone())).unwrap();
     
     tracing::info!("Metrics registry initialized with {} collectors", REGISTRY.gather().len());
 }

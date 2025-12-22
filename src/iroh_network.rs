@@ -21,6 +21,7 @@ use crate::gossip_discovery::{
     GossipDiscoveryBuilder, DiscoverySender, DiscoveryReceiver, DiscoveryNode, 
     NodeCapabilities, PeerInfo,
 };
+use crate::inference::{SignedInferenceMessage, InferenceMessage};
 
 // Shared hardcoded bootstrap (used when no bootstrap peers configured).
 pub const HARDCODED_BOOTSTRAP: &str = "04b754ba2a3da0970d72d08b8740fb2ad96e63cf8f8bef6b7f1ab84e5b09a7f8@67.211.219.34:31001";
@@ -170,10 +171,14 @@ pub struct IrohNetwork {
     sync_topic: TopicId,  // Topic for data sync
     discovery_topic: TopicId,  // Unified discovery topic (postcard + ed25519)
     latency_topic: TopicId,  // Topic for fetch-latency-request
+    inference_jobs_topic: TopicId,  // Topic for inference job distribution
+    inference_results_topic: TopicId,  // Topic for inference results
     // Senders for broadcasting (set after subscribing)
     data_sender: Option<Arc<Mutex<GossipSender>>>,
     sync_sender: Option<Arc<Mutex<GossipSender>>>,  // Sync topic sender
     latency_sender: Option<Arc<Mutex<GossipSender>>>,  // Latency topic sender
+    inference_jobs_sender: Option<Arc<Mutex<GossipSender>>>,  // Inference jobs topic sender
+    inference_results_sender: Option<Arc<Mutex<GossipSender>>>,  // Inference results topic sender
     // Improved gossip discovery (postcard serialization + ed25519 signatures)
     improved_discovery_peers: Arc<dashmap::DashMap<EndpointId, PeerInfo>>,
     // Peer tracking with addresses - stores peers seen in gossip messages
@@ -189,6 +194,8 @@ pub struct IrohNetwork {
     resilience: Option<Arc<crate::network_resilience::NetworkResilience>>,
     // Per-peer connect backoff state: (failure_count, next_allowed_attempt)
     peer_backoff: Arc<dashmap::DashMap<EndpointId, (u32, chrono::DateTime<chrono::Utc>)>>,
+    // Optional InferenceScheduler for AI inference job coordination
+    inference_scheduler: Option<Arc<crate::inference::InferenceScheduler>>,
 }
 
 impl IrohNetwork {
@@ -258,6 +265,22 @@ impl IrohNetwork {
     pub fn attach_sync_manager(&mut self, sync_manager: crate::sync::SyncManager) {
         self.sync_manager = Some(sync_manager);
     }
+
+    /// Attach an InferenceScheduler for AI inference job coordination
+    pub fn attach_inference_scheduler(&mut self, scheduler: Arc<crate::inference::InferenceScheduler>) {
+        self.inference_scheduler = Some(scheduler);
+    }
+
+    /// Get the inference results sender for broadcasting results via gossip
+    pub fn inference_results_sender(&self) -> Option<Arc<Mutex<GossipSender>>> {
+        self.inference_results_sender.clone()
+    }
+
+    /// Get the inference jobs sender for broadcasting jobs via gossip
+    pub fn inference_jobs_sender(&self) -> Option<Arc<Mutex<GossipSender>>> {
+        self.inference_jobs_sender.clone()
+    }
+
     /// Create Iroh network from existing components (recommended)
     /// 
     /// This constructor allows sharing a single Iroh node across multiple
@@ -292,6 +315,10 @@ impl IrohNetwork {
         let discovery_topic = TopicId::from_bytes(*b"cyberfly-discovery-v2-postcard!!");
         // Latency request topic for fetch-latency-request API
         let latency_topic = TopicId::from_bytes(*b"cyberfly-fetch-latency-request!!");
+        // Inference job distribution topic
+        let inference_jobs_topic = TopicId::from_bytes(*b"cyberfly-inference-jobs-v1-0000!");
+        // Inference results topic
+        let inference_results_topic = TopicId::from_bytes(*b"cyberfly-inference-results-v1!!!");
         
         // Parse bootstrap peers (includes hardcoded peer, filtered by local node_id)
         let bootstrap_peers = Self::parse_bootstrap_peers(&bootstrap_peer_strings, node_id);
@@ -313,9 +340,13 @@ impl IrohNetwork {
             sync_topic,
             discovery_topic,
             latency_topic,
+            inference_jobs_topic,
+            inference_results_topic,
             data_sender: None,
             sync_sender: None,
             latency_sender: None,
+            inference_jobs_sender: None,
+            inference_results_sender: None,
             improved_discovery_peers: Arc::new(dashmap::DashMap::new()),
             discovered_peers: Arc::new(dashmap::DashMap::new()),
             peer_announcement_cache: Arc::new(dashmap::DashMap::new()),
@@ -323,6 +354,7 @@ impl IrohNetwork {
             bootstrap_peer_strings,
             resilience: None,
             peer_backoff: Arc::new(dashmap::DashMap::new()),
+            inference_scheduler: None,
         }
     }
 
@@ -776,6 +808,18 @@ impl IrohNetwork {
         self.latency_sender = Some(Arc::new(Mutex::new(latency_sender)));
         tracing::info!("Subscribed to fetch-latency-request topic");
 
+        // Subscribe to inference jobs topic for AI inference distribution
+        let inference_jobs_topic = self.gossip.subscribe(self.inference_jobs_topic, bootstrap_peers.clone()).await?;
+        let (inference_jobs_sender, inference_jobs_receiver) = inference_jobs_topic.split();
+        self.inference_jobs_sender = Some(Arc::new(Mutex::new(inference_jobs_sender)));
+        tracing::info!("✓ Subscribed to inference-jobs topic");
+        
+        // Subscribe to inference results topic for AI inference results
+        let inference_results_topic = self.gossip.subscribe(self.inference_results_topic, bootstrap_peers.clone()).await?;
+        let (inference_results_sender, inference_results_receiver) = inference_results_topic.split();
+        self.inference_results_sender = Some(Arc::new(Mutex::new(inference_results_sender)));
+        tracing::info!("✓ Subscribed to inference-results topic");
+
         // Initialize unified gossip discovery (postcard + ed25519 signatures)
         // This is the only discovery mechanism - simple and secure
         let (mut improved_sender, mut improved_receiver) = GossipDiscoveryBuilder::new()
@@ -852,6 +896,7 @@ impl IrohNetwork {
         // Get node_id first before using in beacon task
         let node_id = self.node_id;
         let secret_key = self.endpoint.secret_key().clone();
+        let inference_scheduler = self.inference_scheduler.clone();
 
         // Start discovery sender task
         let discovery_node = DiscoveryNode {
@@ -865,6 +910,10 @@ impl IrohNetwork {
                 timeseries: true,
                 geo: true,
                 blobs: true,
+                tflite: true,  // TFLite inference supported
+                onnx: false,   // ONNX not yet implemented
+                cpu_cores: std::thread::available_parallelism().map(|p| p.get() as u32).unwrap_or(1),
+                ram_mb: 4096,  // Default 4GB, can be detected via sysinfo
             },
         };
         tokio::spawn(async move {
@@ -1087,6 +1136,8 @@ impl IrohNetwork {
         // Get references for the event loop (no clones needed - already Arc-wrapped)
         let data_sender_clone = self.data_sender.clone().unwrap();
         let latency_sender_clone = self.latency_sender.clone().unwrap();
+        let inference_jobs_sender_clone = self.inference_jobs_sender.clone().unwrap();
+        let inference_results_sender_clone = self.inference_results_sender.clone().unwrap();
         let libp2p_to_mqtt_tx = &self.libp2p_to_mqtt_tx;
         let event_tx = &self.event_tx;
         let discovered_peers = &self.discovered_peers;
@@ -1095,6 +1146,8 @@ impl IrohNetwork {
         let mut data_stream = data_receiver;
         let mut sync_stream = sync_receiver;
         let mut latency_stream = latency_receiver;
+        let mut inference_jobs_stream = inference_jobs_receiver;
+        let mut inference_results_stream = inference_results_receiver;
         
         // Heartbeat interval to prove the event loop is alive
         let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -1183,6 +1236,51 @@ impl IrohNetwork {
                         }
                         None => {
                             tracing::warn!("Latency stream ended");
+                        }
+                    }
+                }
+
+                // Handle gossip events from inference-jobs topic
+                event_result = inference_jobs_stream.next() => {
+                    ops_since_yield += 1;
+                    match event_result {
+                        Some(Ok(event)) => {
+                            if let Err(e) = Self::handle_inference_jobs_event(
+                                event,
+                                node_id,
+                                discovered_peers,
+                                inference_scheduler.clone(),
+                            ).await {
+                                tracing::error!("Error handling inference-jobs event: {}", e);
+                            }
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!("Error reading inference-jobs stream: {}", e);
+                        }
+                        None => {
+                            tracing::warn!("Inference-jobs stream ended");
+                        }
+                    }
+                }
+                
+                // Handle gossip events from inference-results topic
+                event_result = inference_results_stream.next() => {
+                    ops_since_yield += 1;
+                    match event_result {
+                        Some(Ok(event)) => {
+                            if let Err(e) = Self::handle_inference_results_event(
+                                event,
+                                node_id,
+                                discovered_peers,
+                            ).await {
+                                tracing::error!("Error handling inference-results event: {}", e);
+                            }
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!("Error reading inference-results stream: {}", e);
+                        }
+                        None => {
+                            tracing::warn!("Inference-results stream ended");
                         }
                     }
                 }
@@ -1332,6 +1430,162 @@ impl IrohNetwork {
             }
             GossipEvent::Lagged => {
                 tracing::warn!("Latency gossip lagged - missed messages");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle inference jobs gossip events
+    /// Processes incoming inference job postings and job claims
+    async fn handle_inference_jobs_event(
+        event: GossipEvent,
+        node_id: EndpointId,
+        discovered_peers: &Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>,
+        inference_scheduler: Option<Arc<crate::inference::InferenceScheduler>>,
+    ) -> Result<()> {
+        match event {
+            GossipEvent::Received(msg) => {
+                let from = msg.delivered_from;
+                tracing::debug!("🧠 Received inference job message from {} ({} bytes)", from, msg.content.len());
+
+                // Ignore our own messages
+                if from == node_id {
+                    return Ok(());
+                }
+
+                // Track this peer
+                discovered_peers.entry(from).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
+
+                // Verify and decode the signed inference message
+                match SignedInferenceMessage::verify_and_decode::<InferenceMessage>(&msg.content) {
+                    Ok((verifying_key, inference_msg)) => {
+                        tracing::info!("✓ Verified inference message from {:?}", verifying_key);
+                        
+                        match inference_msg {
+                            InferenceMessage::JobPosted(job) => {
+                                tracing::info!(
+                                    "📋 Received inference job: {} model={} max_latency={}ms",
+                                    job.job_id, job.model_name, job.max_latency_ms
+                                );
+                                crate::metrics::GOSSIP_MESSAGES_RECEIVED.with_label_values(&["inference-jobs"]).inc();
+                                
+                                // Add job to scheduler if available
+                                if let Some(ref scheduler) = inference_scheduler {
+                                    match scheduler.add_job(job.clone()).await {
+                                        Ok(()) => {
+                                            tracing::info!("✅ Added job {} to scheduler queue", job.job_id);
+                                            crate::metrics::INFERENCE_JOBS_PENDING.inc();
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("⚠️ Job {} rejected: {}", job.job_id, e);
+                                        }
+                                    }
+                                }
+                            }
+                            InferenceMessage::JobClaimed { job_id, node_id: claimed_by } => {
+                                tracing::info!(
+                                    "🔒 Inference job {} claimed by {}",
+                                    job_id, claimed_by
+                                );
+                            }
+                            InferenceMessage::JobCancelled { job_id, reason } => {
+                                tracing::info!(
+                                    "❌ Inference job {} cancelled: {}",
+                                    job_id, reason
+                                );
+                            }
+                            _ => {
+                                tracing::debug!("Received non-job inference message type on jobs topic");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to verify/decode inference message: {}", e);
+                    }
+                }
+            }
+            GossipEvent::NeighborUp(peer_node_id) => {
+                tracing::debug!("Inference-jobs topic neighbor up: {}", peer_node_id);
+                discovered_peers.entry(peer_node_id).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
+            }
+            GossipEvent::NeighborDown(peer_node_id) => {
+                tracing::debug!("Inference-jobs topic neighbor down: {}", peer_node_id);
+                discovered_peers.entry(peer_node_id)
+                    .and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
+            }
+            GossipEvent::Lagged => {
+                tracing::warn!("Inference-jobs gossip lagged - missed messages");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle inference results gossip events
+    /// Processes incoming inference results from workers
+    async fn handle_inference_results_event(
+        event: GossipEvent,
+        node_id: EndpointId,
+        discovered_peers: &Arc<dashmap::DashMap<EndpointId, (chrono::DateTime<chrono::Utc>, Option<std::net::SocketAddr>)>>,
+    ) -> Result<()> {
+        match event {
+            GossipEvent::Received(msg) => {
+                let from = msg.delivered_from;
+                tracing::debug!("📊 Received inference result message from {} ({} bytes)", from, msg.content.len());
+
+                // Ignore our own messages
+                if from == node_id {
+                    return Ok(());
+                }
+
+                // Track this peer
+                discovered_peers.entry(from).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
+
+                // Verify and decode the signed inference message
+                match SignedInferenceMessage::verify_and_decode::<InferenceMessage>(&msg.content) {
+                    Ok((verifying_key, inference_msg)) => {
+                        tracing::info!("✓ Verified inference result from {:?}", verifying_key);
+                        
+                        match inference_msg {
+                            InferenceMessage::ResultPublished(result) => {
+                                tracing::info!(
+                                    "📊 Received inference result: job={} latency={}ms success={}",
+                                    result.job_id, result.latency_ms, result.success
+                                );
+                                crate::metrics::GOSSIP_MESSAGES_RECEIVED.with_label_values(&["inference-results"]).inc();
+                                
+                                if result.success {
+                                    crate::metrics::INFERENCE_LATENCY_MS.observe(result.latency_ms as f64);
+                                }
+                            }
+                            _ => {
+                                tracing::debug!("Received non-result inference message type on results topic");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to verify/decode inference result: {}", e);
+                    }
+                }
+            }
+            GossipEvent::NeighborUp(peer_node_id) => {
+                tracing::debug!("Inference-results topic neighbor up: {}", peer_node_id);
+                discovered_peers.entry(peer_node_id).and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
+            }
+            GossipEvent::NeighborDown(peer_node_id) => {
+                tracing::debug!("Inference-results topic neighbor down: {}", peer_node_id);
+                discovered_peers.entry(peer_node_id)
+                    .and_modify(|(ts, _addr)| *ts = chrono::Utc::now())
+                    .or_insert((chrono::Utc::now(), None));
+            }
+            GossipEvent::Lagged => {
+                tracing::warn!("Inference-results gossip lagged - missed messages");
             }
         }
 
