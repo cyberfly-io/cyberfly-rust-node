@@ -408,9 +408,10 @@ fn is_segmentation(shape: &[usize]) -> bool {
 /// Check if output looks like OCR/text embeddings
 fn is_ocr_output(shape: &[usize]) -> bool {
     // OCR outputs are typically [1, seq_len, vocab_size] or [batch, seq_len]
+    // Exclude ImageNet classification shapes [1, 1000] or [1, 1001]
     match shape {
-        [1, seq_len, vocab] if *seq_len > 1 && *vocab > 30 => true,
-        [_, seq_len] if *seq_len > 1 => true,
+        [1, seq_len, vocab] if *seq_len > 1 && *vocab > 30 && *vocab != 1000 && *vocab != 1001 => true,
+        [1, seq_len] if *seq_len > 1 && *seq_len != 1000 && *seq_len != 1001 => true,
         _ => false,
     }
 }
