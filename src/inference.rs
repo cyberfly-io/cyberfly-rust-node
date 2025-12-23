@@ -78,11 +78,11 @@ pub type Result<T> = std::result::Result<T, InferenceError>;
 pub const DEFAULT_MODELS: &[(&str, &str, u64)] = &[
     // (model_name, download_url, expected_size_bytes)
     
-    // Image Classification - MobileNet V2 (ONNX)
+    // Image Classification - MobileNet V4 (ONNX) - Latest and most accurate
     (
-        "mobilenet_v2",
-        "https://github.com/onnx/models/raw/main/validated/vision/classification/mobilenet/model/mobilenetv2-7.onnx",
-        14_000_000, // ~14MB
+        "mobilenet_v4",
+        "https://raw.githubusercontent.com/cyberfly-io/cv_models/refs/heads/main/mobilenetv4.onnx",
+        20_000_000, // ~20MB
     ),
     
     // Object Detection - YOLOv8 Nano (ONNX)
@@ -92,18 +92,18 @@ pub const DEFAULT_MODELS: &[(&str, &str, u64)] = &[
         7_000_000, // ~7MB
     ),
     
-    // Image Segmentation - SegFormer (ONNX)
+    // Image Segmentation - SegFormer B0 (ADE20K)
     (
         "segformer",
-        "https://github.com/onnx/models/raw/main/validated/vision/body_analysis/ultraface/models/version-RFB-640.onnx",
-        2_000_000, // ~2MB (using ultraface as placeholder)
+        "https://huggingface.co/nvidia/segformer-b0-finetuned-ade-512-512/resolve/main/onnx/model.onnx",
+        15_000_000, // ~15MB
     ),
     
-    // Text Recognition - EasyOCR English (ONNX, JPQD quantized)
+    // Text Recognition - EasyOCR Sequence Modeler (English)
     (
         "easyocr_en",
-        "https://huggingface.co/asmud/EasyOCR-onnx/resolve/main/english_g2_jpqd.onnx",
-        9_000_000, // ~8.54MB
+        "https://github.com/tulasiram58827/ocr_tflite/raw/main/models/easyocr_onnx/sequence_modeller.onnx",
+        10_000_000, // ~10MB
     ),
     
     // Speech Processing - Silero VAD (ONNX)
@@ -165,6 +165,23 @@ pub async fn ensure_models_downloaded(
         }
     }
     
+    // Download ImageNet labels JSON if not present
+    let labels_path = models_dir.join("imagenet_labels.json");
+    if !labels_path.exists() {
+        let labels_url = "https://raw.githubusercontent.com/anishathalye/imagenet-simple-labels/master/imagenet-simple-labels.json";
+        info!("📥 Downloading ImageNet labels from {}...", labels_url);
+        match download_model(labels_url, &labels_path).await {
+            Ok(size) => {
+                info!("✅ Downloaded ImageNet labels ({} bytes) to {:?}", size, labels_path);
+            }
+            Err(e) => {
+                error!("❌ Failed to download ImageNet labels: {}", e);
+            }
+        }
+    } else {
+        info!("✓ ImageNet labels already exist at {:?}", labels_path);
+    }
+    
     results
 }
 
@@ -207,9 +224,28 @@ async fn download_model(
 // ImageNet Labels and Post-Processing
 // ============================================================================
 
-/// ImageNet 1000 class labels (index 0-999)
-/// Source: https://gist.githubusercontent.com/yrevar/942d3a0ac09ec9e5eb3a
-const IMAGENET_LABELS: &[&str] = &include!("../data/imagenet_labels.txt");
+/// ImageNet 1000 class labels loaded from JSON file
+/// Source: https://github.com/anishathalye/imagenet-simple-labels
+/// The labels are loaded lazily from data/iroh/models/imagenet_labels.json
+fn get_imagenet_label(class_id: usize) -> String {
+    use std::sync::OnceLock;
+    static LABELS: OnceLock<Vec<String>> = OnceLock::new();
+    
+    let labels = LABELS.get_or_init(|| {
+        let labels_path = std::path::Path::new("./data/iroh/models/imagenet_labels.json");
+        if labels_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(labels_path) {
+                if let Ok(parsed) = serde_json::from_str::<Vec<String>>(&content) {
+                    return parsed;
+                }
+            }
+        }
+        // Fallback: empty vector (will return "unknown" for all classes)
+        vec![]
+    });
+    
+    labels.get(class_id).cloned().unwrap_or_else(|| format!("class_{}", class_id))
+}
 
 /// Apply softmax to convert logits to probabilities
 fn softmax(logits: &[f32]) -> Vec<f32> {
@@ -496,19 +532,22 @@ fn process_ocr_output(output: &[f32], shape: &[usize]) -> serde_json::Value {
 /// Check if output is Voice Activity Detection (VAD)
 fn is_vad_output(shape: &[usize]) -> bool {
     // VAD outputs: [1, T] where T is time steps
+    // Exclude ImageNet classification shapes [1, 1000] or [1, 1001]
+    // Exclude YOLO shapes [1, 84, N]
     match shape {
-        [1, t] if *t > 10 => true,
-        [t] if *t > 10 => true,
+        [1, t] if *t > 10 && *t != 1000 && *t != 1001 && *t < 10000 => true,
+        [t] if *t > 10 && *t != 1000 && *t != 1001 && *t < 10000 => true,
         _ => false,
     }
 }
 
 /// Check if output is audio waveform (denoising)
 fn is_audio_output(shape: &[usize]) -> bool {
-    // Audio outputs: [1, samples] or [samples] where samples is large
+    // Audio outputs: [1, samples] or [samples] where samples is large (> 10000)
+    // Must be significantly larger than ImageNet (1000/1001) to avoid false positives
     match shape {
-        [1, s] if *s > 1000 => true,
-        [s] if *s > 1000 => true,
+        [1, s] if *s > 10000 => true,
+        [s] if *s > 10000 => true,
         _ => false,
     }
 }
@@ -964,10 +1003,12 @@ pub mod scheduler {
         pub fn new(node_id: EndpointId, capabilities: InferenceCapabilities) -> Self {
             let mut whitelist = HashSet::new();
             // Default whitelisted models (can be extended via config)
-            whitelist.insert("mobilenet_v2".to_string());
-            whitelist.insert("efficientnet_lite0".to_string());
-            whitelist.insert("ssd_mobilenet".to_string());
-
+            whitelist.insert("mobilenet_v4".to_string());
+            whitelist.insert("easyocr_en".to_string());
+            whitelist.insert("yolov8n".to_string());
+            whitelist.insert("segformer".to_string());
+            whitelist.insert("silero_vad".to_string());
+            whitelist.insert("dtln_denoise".to_string());
             Self {
                 pending_jobs: DashMap::new(),
                 running_jobs: DashMap::new(),
@@ -1263,7 +1304,7 @@ pub mod worker {
             }
         }
 
-        /// Execute TFLite inference using tract
+        /// Execute ONNX inference using ONNX Runtime (ort)
         ///
         /// Loads the model, processes input, runs inference, and returns output URI.
         async fn execute_tflite_inference(
@@ -1272,85 +1313,99 @@ pub mod worker {
             input_uri: &str,
             job: &InferenceJob,
         ) -> Result<String> {
-            use tract_onnx::prelude::*;
+            use ort::session::Session;
+            use ndarray::Array4;
             
             debug!(
                 model_path = %model_path.display(),
                 input_uri = %input_uri,
-                "Executing inference with tract"
+                "Executing inference with ONNX Runtime"
             );
 
-            // Load input data from URI
-            let input_data = self.load_input_data(input_uri).await?;
             
-            // Load and optimize the model using tract
-            // Tract-onnx can load ONNX models; for TFLite, we read raw file and process
-            let extension = model_path.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("tflite");
+            // Load the ONNX model using ort
+            let mut session = Session::builder()
+                .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to create session builder: {}", e)))?
+                .commit_from_file(model_path)
+                .map_err(|e| InferenceError::ModelNotFound(format!("Failed to load ONNX model: {}", e)))?;
             
-            let model = if extension == "onnx" {
-                // Load ONNX model
-                tract_onnx::onnx()
-                    .model_for_path(model_path)
-                    .map_err(|e| InferenceError::ModelNotFound(format!("Failed to load ONNX model: {}", e)))?
-                    .into_optimized()
-                    .map_err(|e| InferenceError::ExecutionFailed(format!("Model optimization failed: {}", e)))?
-                    .into_runnable()
-                    .map_err(|e| InferenceError::ExecutionFailed(format!("Model not runnable: {}", e)))?
+            // Determine input shape based on model requirements
+            let (batch, channels, height, width) = if job.model_name.starts_with("mobilenet") {
+                // MobileNetV4 expects 256x256
+                (1usize, 3usize, 256usize, 256usize)
+            } else if job.model_name.starts_with("yolo") {
+                (1usize, 3usize, 640usize, 640usize)
             } else {
-                // For TFLite, use tract-tensorflow or fallback to simple output
-                // Note: tract-onnx doesn't natively support TFLite
-                // Return a placeholder result for now - full TFLite support requires tract-tensorflow
-                warn!(
-                    model_path = %model_path.display(),
-                    "TFLite native execution not available, returning simulated result"
-                );
-                
-                // Simulate execution and return placeholder
-                let output_hash = format!("{:x}", md5::compute(&input_data));
-                let output_uri = format!("data:simulated;model={};hash={}", 
-                    model_path.file_stem().unwrap_or_default().to_string_lossy(),
-                    output_hash
-                );
-                return Ok(output_uri);
+                (1usize, 3usize, 224usize, 224usize)
             };
 
-            // Get model input shape from the underlying model
-            let input_fact = model.model().input_fact(0)
-                .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to get input fact: {}", e)))?
-                .clone();
+            // Load input data from URI and decode/resize to required dimensions
+            let input_data = self.load_input_data(input_uri, width, height).await?;
             
-            // Create input tensor from data - use default 224x224x3 image shape if dynamic
-            let input_shape: Vec<usize> = input_fact.shape.as_concrete()
-                .map(|s| s.to_vec())
-                .unwrap_or_else(|| vec![1, 224, 224, 3]);
+            // Prepare input tensor with proper normalization
+            let mut float_data = vec![0.0f32; batch * channels * height * width];
             
-            let expected_size: usize = input_shape.iter().product();
+            if job.model_name.starts_with("mobilenet") {
+                // MobileNet normalization: pixel = (pixel / 127.5) - 1.0 → range [-1, 1]
+                // NOT ImageNet mean/std normalization!
+                for h in 0..height {
+                    for w in 0..width {
+                        let pixel_idx = (h * width + w) * 3;
+                        for c in 0..channels {
+                            let input_val = if pixel_idx + c < input_data.len() {
+                                input_data[pixel_idx + c]
+                            } else {
+                                0
+                            };
+                            // Correct MobileNet normalization: [-1, 1] range
+                            let normalized = (input_val as f32 / 127.5) - 1.0;
+                            // NCHW format: [batch, channel, height, width]
+                            let output_idx = c * height * width + h * width + w;
+                            float_data[output_idx] = normalized;
+                        }
+                    }
+                }
+            } else {
+                // YOLO and others: simple [0, 1] normalization in NCHW format
+                for h in 0..height {
+                    for w in 0..width {
+                        let pixel_idx = (h * width + w) * 3;
+                        for c in 0..channels {
+                            let input_idx = if pixel_idx + c < input_data.len() {
+                                input_data[pixel_idx + c]
+                            } else {
+                                0
+                            };
+                            let normalized = input_idx as f32 / 255.0;
+                            let output_idx = c * height * width + h * width + w;
+                            float_data[output_idx] = normalized;
+                        }
+                    }
+                }
+            }
             
-            // Convert u8 to f32 (normalize to 0-1 range for images)
-            let float_data: Vec<f32> = input_data.iter()
-                .take(expected_size)
-                .map(|&x| x as f32 / 255.0)
-                .collect();
+            // Create ndarray tensor
+            let input_array = Array4::<f32>::from_shape_vec(
+                (batch, channels, height, width),
+                float_data
+            ).map_err(|e| InferenceError::InputLoadFailed(format!("Failed to create tensor: {}", e)))?;
             
-            // Pad or truncate to expected size
-            let mut padded = vec![0.0f32; expected_size];
-            let copy_len = float_data.len().min(expected_size);
-            padded[..copy_len].copy_from_slice(&float_data[..copy_len]);
+            // Get input name from model
+            let input_name = session.inputs.first()
+                .map(|i| i.name.clone())
+                .unwrap_or_else(|| "input".to_string());
             
-            let input_tensor: Tensor = Tensor::from_shape(&input_shape, &padded)
-                .map_err(|e| InferenceError::InputLoadFailed(format!("Failed to create tensor: {}", e)))?;
-
-            // Run inference and process output within a block to ensure outputs (non-Send) 
-            // are dropped before the await point
-            let output_json = {
-                let outputs = model.run(tvec![input_tensor.into()])
-                    .map_err(|e| InferenceError::ExecutionFailed(format!("Inference failed: {}", e)))?;
-
-                // Process output synchronously to get JSON string
-                self.process_outputs(&outputs)?
-            };
+            // Create TensorRef from array view for ort input
+            let tensor_ref = ort::value::TensorRef::from_array_view(&input_array)
+                .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to create tensor ref: {}", e)))?;
+            
+            // Run inference
+            let outputs = session.run(
+                ort::inputs![input_name.as_str() => tensor_ref]
+            ).map_err(|e| InferenceError::ExecutionFailed(format!("Inference failed: {}", e)))?;
+            
+            // Process output
+            let output_json = self.process_ort_outputs(&outputs, job)?;
 
             // Create a temporary result for metadata storage
             let temp_result = InferenceResult::success(
@@ -1372,102 +1427,68 @@ pub mod worker {
             Ok(output_uri)
         }
 
-        /// Load input data from URI (blob:// or file://)
-        async fn load_input_data(&self, input_uri: &str) -> Result<Vec<u8>> {
+        /// Load input data from URI, decode image and resize to target dimensions
+        async fn load_input_data(&self, input_uri: &str, target_width: usize, target_height: usize) -> Result<Vec<u8>> {
+            use image::imageops::FilterType;
+
+            // Helper to decode image bytes, resize and return RGB byte vector
+            fn decode_and_resize(bytes: &[u8], w: u32, h: u32) -> std::result::Result<Vec<u8>, String> {
+                let img = image::load_from_memory(bytes).map_err(|e| format!("Image decode failed: {}", e))?;
+                let img = img.resize_exact(w, h, FilterType::Lanczos3).to_rgb8();
+                Ok(img.into_raw())
+            }
+
             if input_uri.starts_with("blob://") {
                 // Load from blob storage (placeholder - would use iroh blobs)
                 let hash = input_uri.strip_prefix("blob://").unwrap();
-                debug!(hash = %hash, "Loading input from blob storage");
-                // For now, return empty - in production, fetch from blob store
-                Ok(vec![0u8; 224 * 224 * 3]) // Default image size
+                debug!(hash = %hash, "Loading input from blob storage (placeholder)");
+                // For now, return a zeroed RGB image of requested size
+                Ok(vec![0u8; target_width * target_height * 3])
             } else if input_uri.starts_with("file://") {
                 let path = input_uri.strip_prefix("file://").unwrap();
-                tokio::fs::read(path).await
-                    .map_err(|e| InferenceError::InputLoadFailed(format!("Failed to read file: {}", e)))
+                let bytes = tokio::fs::read(path).await
+                    .map_err(|e| InferenceError::InputLoadFailed(format!("Failed to read file: {}", e)))?;
+                decode_and_resize(&bytes, target_width as u32, target_height as u32)
+                    .map_err(|e| InferenceError::InputLoadFailed(e))
             } else if input_uri.starts_with("http://") || input_uri.starts_with("https://") {
                 // Download from URL
                 let response = reqwest::get(input_uri).await
                     .map_err(|e| InferenceError::InputLoadFailed(format!("HTTP request failed: {}", e)))?;
-                response.bytes().await
-                    .map(|b| b.to_vec())
-                    .map_err(|e| InferenceError::InputLoadFailed(format!("Failed to read response: {}", e)))
+                let bytes = response.bytes().await
+                    .map_err(|e| InferenceError::InputLoadFailed(format!("Failed to read response: {}", e)))?;
+                decode_and_resize(&bytes, target_width as u32, target_height as u32)
+                    .map_err(|e| InferenceError::InputLoadFailed(e))
             } else {
-                // Assume base64 encoded data
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, input_uri)
-                    .map_err(|e| InferenceError::InputLoadFailed(format!("Base64 decode failed: {}", e)))
+                // Assume base64 encoded image data
+                let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, input_uri)
+                    .map_err(|e| InferenceError::InputLoadFailed(format!("Base64 decode failed: {}", e)))?;
+                decode_and_resize(&decoded, target_width as u32, target_height as u32)
+                    .map_err(|e| InferenceError::InputLoadFailed(e))
             }
         }
 
-        /// Prepare input tensor from raw data
-        fn prepare_input_tensor(
+        /// Process ONNX Runtime outputs and convert to JSON
+        fn process_ort_outputs(
             &self,
-            data: &[u8],
-            input_fact: &tract_onnx::prelude::TypedFact,
-        ) -> std::result::Result<tract_onnx::prelude::Tensor, String> {
-            use tract_onnx::prelude::*;
-            
-            // Get expected shape from model
-            let shape = input_fact.shape.as_concrete()
-                .ok_or_else(|| "Dynamic input shape not supported".to_string())?;
-            
-            // Calculate expected size
-            let expected_size: usize = shape.iter().product();
-            
-            // Create tensor based on data type
-            if input_fact.datum_type == f32::datum_type() {
-                // Convert u8 to f32 (normalize to 0-1 range for images)
-                let float_data: Vec<f32> = data.iter()
-                    .take(expected_size)
-                    .map(|&x| x as f32 / 255.0)
-                    .collect();
-                
-                // Pad or truncate to expected size
-                let mut padded = vec![0.0f32; expected_size];
-                let copy_len = float_data.len().min(expected_size);
-                padded[..copy_len].copy_from_slice(&float_data[..copy_len]);
-                
-                Tensor::from_shape(&shape, &padded)
-                    .map_err(|e| format!("Failed to create tensor: {}", e))
-            } else if input_fact.datum_type == u8::datum_type() {
-                // Use raw u8 data
-                let mut padded = vec![0u8; expected_size];
-                let copy_len = data.len().min(expected_size);
-                padded[..copy_len].copy_from_slice(&data[..copy_len]);
-                
-                Tensor::from_shape(&shape, &padded)
-                    .map_err(|e| format!("Failed to create tensor: {}", e))
-            } else {
-                Err(format!("Unsupported input type: {:?}", input_fact.datum_type))
-            }
-        }
-
-        /// Convert output tensor(s) to JSON string (Sync)
-        ///
-        /// This must be synchronous to avoid holding Rc<Tensor> (non-Send) across await points.
-        /// For classification models (ImageNet), applies softmax and returns labeled predictions.
-        fn process_outputs(
-            &self,
-            outputs: &tract_onnx::prelude::TVec<tract_onnx::prelude::TValue>,
+            outputs: &ort::session::output::SessionOutputs<'_>,
+            _job: &InferenceJob,
         ) -> Result<String> {
-            // Check if this is an ImageNet classification model
-            let first_output = outputs.get(0).ok_or_else(|| {
-                InferenceError::ExecutionFailed("No output tensors".to_string())
-            })?;
+            // Get first output value
+            let (_, output_value) = outputs.iter().next()
+                .ok_or_else(|| InferenceError::ExecutionFailed("No output tensors".to_string()))?;
             
-            // Try to get f32 array view
-            if let Ok(arr) = first_output.to_array_view::<f32>() {
-                let shape: Vec<usize> = arr.shape().to_vec();
-                let values: Vec<f32> = arr.iter().cloned().collect();
+            // Extract as f32 ndarray
+            let array = output_value.try_extract_array::<f32>()
+                .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to extract array: {}", e)))?;
+            
+            let shape: Vec<usize> = array.shape().to_vec();
+            let values: Vec<f32> = array.iter().cloned().collect();
                 
                 // Check if this is YOLO object detection output
                 if is_yolo_detection(&shape) {
-                    // Process YOLO detections
-                    let mut detections = process_yolo_output(&values, &shape, 0.25); // conf_threshold = 0.25
+                    let mut detections = process_yolo_output(&values, &shape, 0.25);
+                    let detections = nms(&mut detections, 0.45);
                     
-                    // Apply NMS
-                    let detections = nms(&mut detections, 0.45); // iou_threshold = 0.45
-                    
-                    // Build structured detection result
                     let mut result = serde_json::Map::new();
                     result.insert("type".to_string(), serde_json::json!("object_detection"));
                     result.insert("num_detections".to_string(), serde_json::json!(detections.len()));
@@ -1477,38 +1498,17 @@ pub mod worker {
                         .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
                 }
                 
-                // Check if this is segmentation output
-                if is_segmentation(&shape) {
-                    let result = process_segmentation_output(&values, &shape);
-                    return serde_json::to_string(&result)
-                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
-                }
-                
-                // Check if this is OCR output
-                if is_ocr_output(&shape) {
-                    let result = process_ocr_output(&values, &shape);
-                    return serde_json::to_string(&result)
-                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
-                }
-                
-                // Check if this is VAD output
-                if is_vad_output(&shape) {
-                    let result = process_vad_output(&values, &shape);
-                    return serde_json::to_string(&result)
-                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
-                }
-                
-                // Check if this is audio denoising output
-                if is_audio_output(&shape) {
-                    let result = process_audio_output(&values, &shape);
-                    return serde_json::to_string(&result)
-                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
-                }
-                
                 // Check if this is ImageNet classification output
                 if is_imagenet_classification(&shape) {
-                    // Apply softmax to convert logits to probabilities
-                    let probabilities = softmax(&values);
+                    // Check if output is already softmaxed
+                    let sum: f32 = values.iter().sum();
+                    let is_already_softmaxed = (sum - 1.0).abs() < 0.1;
+                    
+                    let probabilities = if is_already_softmaxed {
+                        values.clone()
+                    } else {
+                        softmax(&values)
+                    };
                     
                     // Get top-5 predictions
                     let top_5 = get_top_k_predictions(&probabilities, 5);
@@ -1519,9 +1519,7 @@ pub mod worker {
                     
                     // Top-1 prediction
                     if let Some((class_id, confidence)) = top_5.first() {
-                        let label = IMAGENET_LABELS.get(*class_id)
-                            .unwrap_or(&"unknown")
-                            .to_string();
+                        let label = get_imagenet_label(*class_id);
                         result.insert("top_1".to_string(), serde_json::json!({
                             "label": label,
                             "class_id": class_id,
@@ -1531,9 +1529,7 @@ pub mod worker {
                     
                     // Top-5 predictions
                     let top_5_json: Vec<serde_json::Value> = top_5.iter().map(|(class_id, confidence)| {
-                        let label = IMAGENET_LABELS.get(*class_id)
-                            .unwrap_or(&"unknown")
-                            .to_string();
+                        let label = get_imagenet_label(*class_id);
                         serde_json::json!({
                             "label": label,
                             "class_id": class_id,
@@ -1545,38 +1541,15 @@ pub mod worker {
                     return serde_json::to_string(&result)
                         .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
                 }
-            }
-            
-            // Fallback: serialize raw output tensors to JSON (for non-classification models)
-            let mut output_data = serde_json::Map::new();
-            
-            for (i, output) in outputs.iter().enumerate() {
-                let tensor = output.to_array_view::<f32>()
-                    .map(|arr| {
-                        let values: Vec<f32> = arr.iter().cloned().collect();
-                        serde_json::json!({
-                            "shape": arr.shape(),
-                            "values": values
-                        })
-                    })
-                    .unwrap_or_else(|_| {
-                        // Try as i64
-                        output.to_array_view::<i64>()
-                            .map(|arr| {
-                                let values: Vec<i64> = arr.iter().cloned().collect();
-                                serde_json::json!({
-                                    "shape": arr.shape(),
-                                    "values": values
-                                })
-                            })
-                            .unwrap_or_else(|_| serde_json::json!({"error": "unsupported output type"}))
-                    });
                 
-                output_data.insert(format!("output_{}", i), tensor);
-            }
-            
-            serde_json::to_string(&output_data)
-                .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)))
+                // Default: return raw output
+                let result = serde_json::json!({
+                    "type": "raw",
+                    "shape": shape,
+                    "values": values
+                });
+                serde_json::to_string(&result)
+                    .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)))
         }
 
         /// Store output JSON as blob and metadata (Async)
