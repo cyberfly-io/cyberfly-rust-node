@@ -271,6 +271,8 @@ pub struct InferenceJobGql {
     pub status: String,
     pub created_at: String,
     pub requester: String,
+    /// How long the job has been running (if still running), in milliseconds
+    pub elapsed_time_ms: Option<i64>,
 }
 
 /// Inference result
@@ -2340,6 +2342,15 @@ impl QueryRoot {
             })?;
 
         if let Some(job) = scheduler.get_job(&job_id) {
+            // Calculate elapsed time for running jobs
+            let elapsed_time_ms = match &job.status {
+                crate::inference::JobStatus::Running { started_at, .. } => {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    Some((now - started_at) as i64)
+                }
+                _ => None,
+            };
+            
             return Ok(Some(InferenceJobGql {
                 job_id: job.job_id,
                 model_name: job.model_name,
@@ -2348,6 +2359,7 @@ impl QueryRoot {
                 status: format!("{:?}", job.status),
                 created_at: job.created_at.to_string(),
                 requester: job.requester,
+                elapsed_time_ms,
             }));
         }
         
@@ -2362,6 +2374,7 @@ impl QueryRoot {
                 status: "Completed".to_string(),
                 created_at: result.completed_at.to_string(), // Approx
                 requester: "unknown".to_string(),
+                elapsed_time_ms: Some(result.latency_ms as i64), // Use actual latency
             }));
         }
 

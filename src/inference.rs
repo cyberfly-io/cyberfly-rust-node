@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, trace};
 
 // Re-export for external use
 pub use worker::InferenceWorker;
@@ -85,11 +85,11 @@ pub const DEFAULT_MODELS: &[(&str, &str, u64)] = &[
         20_000_000, // ~20MB
     ),
     
-    // Object Detection - YOLOv8 Nano (ONNX)
+    // Object Detection - YOLOv11 Nano (ONNX)
     (
-        "yolov8n",
-        "https://github.com/jahongir7174/YOLOv8-onnx/raw/refs/heads/master/weights/v8_n.onnx",
-        7_000_000, // ~7MB
+        "yolo11n",
+        "https://raw.githubusercontent.com/cyberfly-io/cv_models/refs/heads/main/yolo11n.onnx",
+        8_000_000, // ~8MB (approximate)
     ),
     
     // Image Segmentation - SegFormer B0 (ADE20K)
@@ -264,6 +264,11 @@ fn softmax(logits: &[f32]) -> Vec<f32> {
     exp_values.iter().map(|&x| x / sum).collect()
 }
 
+/// Sigmoid activation
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
 /// Check if output shape matches ImageNet classification (1000 or 1001 classes)
 fn is_imagenet_classification(shape: &[usize]) -> bool {
     // Shape should be [1, N] or [N] where N is 1000 or 1001
@@ -320,55 +325,68 @@ struct Detection {
     class: String,
     class_id: usize,
     confidence: f32,
-    bbox: [f32; 4], // [x, y, w, h]
+    bbox: [f32; 4], // [x1, y1, x2, y2] (pixel coordinates)
 }
 
-/// Non-Maximum Suppression
+/// Non-Maximum Suppression (Class-Aware)
+/// Processes each class separately to avoid cross-class suppression
 fn nms(detections: &mut Vec<Detection>, iou_threshold: f32) -> Vec<Detection> {
     if detections.is_empty() {
         return vec![];
     }
     
-    // Sort by confidence descending
-    detections.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    // Group detections by class
+    let mut by_class: std::collections::HashMap<usize, Vec<Detection>> = std::collections::HashMap::new();
+    for det in detections.drain(..) {
+        by_class.entry(det.class_id).or_default().push(det);
+    }
     
-    let mut keep = vec![];
-    let mut suppressed = vec![false; detections.len()];
+    let mut keep = Vec::new();
     
-    for i in 0..detections.len() {
-        if suppressed[i] {
-            continue;
-        }
-        keep.push(detections[i].clone());
+    // Apply NMS per class
+    for (_, mut class_dets) in by_class {
+        // Sort by confidence descending
+        class_dets.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
         
-        for j in (i + 1)..detections.len() {
-            if suppressed[j] {
+        let mut suppressed = vec![false; class_dets.len()];
+        
+        for i in 0..class_dets.len() {
+            if suppressed[i] {
                 continue;
             }
+            keep.push(class_dets[i].clone());
             
-            // Calculate IoU
-            let iou = calculate_iou(&detections[i].bbox, &detections[j].bbox);
-            if iou > iou_threshold {
-                suppressed[j] = true;
+            for j in (i + 1)..class_dets.len() {
+                if suppressed[j] {
+                    continue;
+                }
+                
+                let iou = calculate_iou(&class_dets[i].bbox, &class_dets[j].bbox);
+                if iou > iou_threshold {
+                    suppressed[j] = true;
+                }
             }
         }
     }
     
+    // Sort final results by confidence
+    keep.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
     keep
 }
 
 /// Calculate Intersection over Union
 fn calculate_iou(box1: &[f32; 4], box2: &[f32; 4]) -> f32 {
+    // Boxes are [x1, y1, x2, y2]
     let x1 = box1[0].max(box2[0]);
     let y1 = box1[1].max(box2[1]);
-    let x2 = (box1[0] + box1[2]).min(box2[0] + box2[2]);
-    let y2 = (box1[1] + box1[3]).min(box2[1] + box2[3]);
-    
+    let x2 = box1[2].min(box2[2]);
+    let y2 = box1[3].min(box2[3]);
+
     let intersection = (x2 - x1).max(0.0) * (y2 - y1).max(0.0);
-    let area1 = box1[2] * box1[3];
-    let area2 = box2[2] * box2[3];
+    let area1 = (box1[2] - box1[0]).max(0.0) * (box1[3] - box1[1]).max(0.0);
+    let area2 = (box2[2] - box2[0]).max(0.0) * (box2[3] - box2[1]).max(0.0);
     let union = area1 + area2 - intersection;
-    
+
     if union > 0.0 {
         intersection / union
     } else {
@@ -376,46 +394,158 @@ fn calculate_iou(box1: &[f32; 4], box2: &[f32; 4]) -> f32 {
     }
 }
 
-/// Process YOLOv8 output into detections
-fn process_yolo_output(output: &[f32], shape: &[usize], conf_threshold: f32) -> Vec<Detection> {
-    let mut detections = vec![];
-    
-    // YOLOv8 format: [1, 84, 8400] where 84 = 4 (bbox) + 80 (classes)
-    if let [1, 84, num_boxes] = shape {
-        for i in 0..*num_boxes {
-            // Extract bbox (first 4 values)
-            let x = output[i];
-            let y = output[num_boxes + i];
-            let w = output[2 * num_boxes + i];
-            let h = output[3 * num_boxes + i];
+/// Process YOLOv8/v11 output into detections
+/// 
+/// YOLOv11 Ultralytics ONNX export format:
+/// - Shape: [1, 84, 8400] where 84 = 4 (bbox) + 80 (classes)
+/// - Bbox format: (cx, cy, w, h) in PIXEL coordinates relative to input size
+/// - Class scores: raw logits, need sigmoid
+/// - No separate objectness score in YOLOv11 (unlike v5)
+fn process_yolo_output(output: &[f32], shape: &[usize], conf_threshold: f32, input_w: usize, input_h: usize) -> Vec<Detection> {
+    let mut detections = Vec::with_capacity(500);
+
+    if shape.len() != 3 {
+        return detections;
+    }
+
+    // YOLOv8/v11 channel-first format: [1, 84, 8400]
+    // 84 = 4 (cx, cy, w, h) + 80 (class scores)
+    if shape[0] == 1 && shape[1] >= 4 {
+        let features = shape[1];
+        let num_boxes = shape[2];
+        
+        // YOLOv11 has 84 features: 4 bbox + 80 classes (no objectness)
+        // YOLOv5 has 85 features: 4 bbox + 1 obj + 80 classes
+        let has_objectness = features == 85;
+        let classes_offset = if has_objectness { 5 } else { 4 };
+        let num_classes = features.saturating_sub(classes_offset).min(COCO_LABELS.len());
+
+        for i in 0..num_boxes {
+            // Channel-first indexing: output[feature_idx * num_boxes + box_idx]
+            let get = |f: usize| -> f32 { output[f * num_boxes + i] };
             
-            // Find max class confidence
-            let mut max_conf = 0.0f32;
-            let mut max_class = 0;
+            // For YOLOv5 with objectness: apply sigmoid and threshold early
+            let objectness = if has_objectness {
+                let obj_raw = get(4);
+                if obj_raw < -1.1 { continue; } // Early skip: sigmoid(-1.1) ≈ 0.25
+                sigmoid(obj_raw)
+            } else {
+                1.0 // YOLOv11 has no objectness, so treat as 1.0
+            };
+
+            // Find BEST class only (argmax over class scores)
+            let mut best_class = 0;
+            let mut best_class_logit = f32::NEG_INFINITY;
             
-            for c in 0..80 {
-                let conf = output[(4 + c) * num_boxes + i];
-                if conf > max_conf {
-                    max_conf = conf;
-                    max_class = c;
+            for c in 0..num_classes {
+                let class_logit = get(classes_offset + c);
+                if class_logit > best_class_logit {
+                    best_class_logit = class_logit;
+                    best_class = c;
                 }
             }
             
-            if max_conf > conf_threshold {
-                let class_name = COCO_LABELS.get(max_class)
-                    .unwrap_or(&"unknown")
-                    .to_string();
-                
-                detections.push(Detection {
-                    class: class_name,
-                    class_id: max_class,
-                    confidence: max_conf,
-                    bbox: [x, y, w, h],
-                });
+            // Apply sigmoid to get probability
+            let best_class_prob = sigmoid(best_class_logit);
+            let score = objectness * best_class_prob;
+            
+            // Early threshold - skip low confidence
+            if score <= conf_threshold || score.is_nan() {
+                continue;
             }
+            
+            // Get bbox coordinates
+            // YOLOv11 Ultralytics export: (cx, cy, w, h) in PIXELS relative to input size
+            let cx = get(0);
+            let cy = get(1);
+            let w = get(2);
+            let h = get(3);
+            
+            // Convert center-format to corner-format (x1, y1, x2, y2)
+            // Values are already in pixels, NO multiplication needed!
+            let x1 = (cx - w / 2.0).max(0.0);
+            let y1 = (cy - h / 2.0).max(0.0);
+            let x2 = (cx + w / 2.0).min(input_w as f32);
+            let y2 = (cy + h / 2.0).min(input_h as f32);
+            
+            // Sanity check: skip invalid boxes
+            if x2 <= x1 || y2 <= y1 || w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+
+            let class_name = COCO_LABELS.get(best_class).unwrap_or(&"unknown").to_string();
+            detections.push(Detection {
+                class: class_name,
+                class_id: best_class,
+                confidence: score.clamp(0.0, 1.0),
+                bbox: [x1, y1, x2, y2],
+            });
         }
     }
-    
+
+    // Case B: channel-last [1, N, features] (some exported models)
+    if shape[0] == 1 && shape[2] >= 4 && detections.is_empty() {
+        let num_boxes = shape[1];
+        let features = shape[2];
+        let has_objectness = features == 85;
+        let classes_offset = if has_objectness { 5 } else { 4 };
+        let num_classes = features.saturating_sub(classes_offset).min(COCO_LABELS.len());
+
+        for i in 0..num_boxes {
+            let base = i * features;
+            
+            let objectness = if has_objectness {
+                let obj_raw = output[base + 4];
+                if obj_raw < -1.1 { continue; }
+                sigmoid(obj_raw)
+            } else {
+                1.0
+            };
+
+            // Find BEST class only
+            let mut best_class = 0;
+            let mut best_class_logit = f32::NEG_INFINITY;
+            
+            for c in 0..num_classes {
+                let class_logit = output[base + classes_offset + c];
+                if class_logit > best_class_logit {
+                    best_class_logit = class_logit;
+                    best_class = c;
+                }
+            }
+            
+            let best_class_prob = sigmoid(best_class_logit);
+            let score = objectness * best_class_prob;
+            
+            if score <= conf_threshold || score.is_nan() {
+                continue;
+            }
+
+            let cx = output[base];
+            let cy = output[base + 1];
+            let w = output[base + 2];
+            let h = output[base + 3];
+            
+            // Already in pixels
+            let x1 = (cx - w / 2.0).max(0.0);
+            let y1 = (cy - h / 2.0).max(0.0);
+            let x2 = (cx + w / 2.0).min(input_w as f32);
+            let y2 = (cy + h / 2.0).min(input_h as f32);
+            
+            if x2 <= x1 || y2 <= y1 || w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+
+            let class_name = COCO_LABELS.get(best_class).unwrap_or(&"unknown").to_string();
+            detections.push(Detection {
+                class: class_name,
+                class_id: best_class,
+                confidence: score.clamp(0.0, 1.0),
+                bbox: [x1, y1, x2, y2],
+            });
+        }
+    }
+
     detections
 }
 
@@ -1005,7 +1135,7 @@ pub mod scheduler {
             // Default whitelisted models (can be extended via config)
             whitelist.insert("mobilenet_v4".to_string());
             whitelist.insert("easyocr_en".to_string());
-            whitelist.insert("yolov8n".to_string());
+            whitelist.insert("yolo11n".to_string());
             whitelist.insert("segformer".to_string());
             whitelist.insert("silero_vad".to_string());
             whitelist.insert("dtln_denoise".to_string());
@@ -1225,6 +1355,8 @@ pub mod worker {
         blob_store: iroh_blobs::store::fs::FsStore,
         /// Whether worker is running
         running: std::sync::atomic::AtomicBool,
+        /// Per-model ONNX Runtime session cache (model_name -> Session)
+        session_cache: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<ort::session::Session>>>>>,
     }
 
     impl InferenceWorker {
@@ -1241,6 +1373,7 @@ pub mod worker {
                 secret_key,
                 blob_store,
                 running: std::sync::atomic::AtomicBool::new(false),
+                session_cache: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             }
         }
 
@@ -1316,18 +1449,13 @@ pub mod worker {
             use ort::session::Session;
             use ndarray::Array4;
             
-            debug!(
+            info!(
                 model_path = %model_path.display(),
                 input_uri = %input_uri,
-                "Executing inference with ONNX Runtime"
+                job_id = %job.job_id,
+                "🚀 Starting ONNX inference execution"
             );
 
-            
-            // Load the ONNX model using ort
-            let mut session = Session::builder()
-                .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to create session builder: {}", e)))?
-                .commit_from_file(model_path)
-                .map_err(|e| InferenceError::ModelNotFound(format!("Failed to load ONNX model: {}", e)))?;
             
             // Determine input shape based on model requirements
             let (batch, channels, height, width) = if job.model_name.starts_with("mobilenet") {
@@ -1384,28 +1512,145 @@ pub mod worker {
                 }
             }
             
-            // Create ndarray tensor
-            let input_array = Array4::<f32>::from_shape_vec(
-                (batch, channels, height, width),
-                float_data
-            ).map_err(|e| InferenceError::InputLoadFailed(format!("Failed to create tensor: {}", e)))?;
-            
-            // Get input name from model
-            let input_name = session.inputs.first()
-                .map(|i| i.name.clone())
-                .unwrap_or_else(|| "input".to_string());
-            
-            // Create TensorRef from array view for ort input
-            let tensor_ref = ort::value::TensorRef::from_array_view(&input_array)
-                .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to create tensor ref: {}", e)))?;
-            
-            // Run inference
-            let outputs = session.run(
-                ort::inputs![input_name.as_str() => tensor_ref]
-            ).map_err(|e| InferenceError::ExecutionFailed(format!("Inference failed: {}", e)))?;
-            
-            // Process output
-            let output_json = self.process_ort_outputs(&outputs, job)?;
+            info!(
+                job_id = %job.job_id,
+                model = %job.model_name,
+                input_size = format!("{}x{}", width, height),
+                "📦 Input preprocessed, starting model inference"
+            );
+
+            // Run ONNX Runtime in a blocking thread to avoid blocking the async runtime
+            let model_path_buf = model_path.clone();
+            let job_model_name = job.model_name.clone();
+            let float_data = float_data; // move into closure
+            // Clone cache for blocking thread
+            let cache = self.session_cache.clone();
+            let run_result = tokio::task::spawn_blocking(move || -> std::result::Result<String, InferenceError> {
+                // Try to get cached session for this model
+                let mut init_time_ms = 0u128;
+                let mut run_time_ms = 0u128;
+                let session_arc = {
+                    let mut cache_lock = cache.lock().unwrap();
+                    if let Some(sess) = cache_lock.get(&job_model_name) {
+                        info!(model = %job_model_name, "✅ Using cached ONNX session");
+                        sess.clone()
+                    } else {
+                        // Initialize session once and cache it
+                        info!(model = %job_model_name, "🔄 Loading ONNX model (first run, may take 2-5s)...");
+                        let t0 = std::time::Instant::now();
+                        // Enable graph optimizations and threading for 5-10x speedup
+                        let num_threads = std::thread::available_parallelism()
+                            .map(|p| p.get())
+                            .unwrap_or(4);
+                        let sess = Session::builder()
+                            .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to create session builder: {}", e)))?
+                            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+                            .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to set optimization level: {}", e)))?
+                            .with_intra_threads(num_threads)
+                            .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to set intra threads: {}", e)))?
+                            .with_inter_threads(1)
+                            .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to set inter threads: {}", e)))?
+                            .commit_from_file(&model_path_buf)
+                            .map_err(|e| InferenceError::ModelNotFound(format!("Failed to load ONNX model: {}", e)))?;
+                        init_time_ms = t0.elapsed().as_millis();
+                        info!(model = %job_model_name, init_time_ms = init_time_ms, "✅ ONNX session initialized");
+                        let sess_arc = std::sync::Arc::new(std::sync::Mutex::new(sess));
+                        cache_lock.insert(job_model_name.clone(), sess_arc.clone());
+                        sess_arc
+                    }
+                };
+
+                // Build input tensor
+                let input_array = Array4::<f32>::from_shape_vec((batch, channels, height, width), float_data)
+                    .map_err(|e| InferenceError::InputLoadFailed(format!("Failed to create tensor: {}", e)))?;
+
+                // Lock session and run inference, extracting output data while lock held
+                let t_run_start = std::time::Instant::now();
+                let (shape, values) = {
+                    let mut session_lock = session_arc.lock().unwrap();
+                    let input_name = session_lock.inputs.first()
+                        .map(|i| i.name.clone())
+                        .unwrap_or_else(|| "input".to_string());
+                    let tensor_ref = ort::value::TensorRef::from_array_view(&input_array)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to create tensor ref: {}", e)))?;
+                    let outs = session_lock.run(ort::inputs![input_name.as_str() => tensor_ref])
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("Inference failed: {}", e)))?;
+
+                    // Extract first output tensor as owned Vec<f32> while session_lock is held
+                    let (_, output_value) = outs.iter().next()
+                        .ok_or_else(|| InferenceError::ExecutionFailed("No output tensors".to_string()))?;
+                    let array = output_value.try_extract_array::<f32>()
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("Failed to extract array: {}", e)))?;
+
+                    let shape: Vec<usize> = array.shape().to_vec();
+                    let values: Vec<f32> = array.iter().cloned().collect();
+                    (shape, values)
+                };
+                run_time_ms = t_run_start.elapsed().as_millis();
+
+                // Log timings at info level for visibility
+                info!(model = %job_model_name, session_init_ms = init_time_ms, run_ms = run_time_ms, "🧠 ONNX inference completed");
+
+                // Check if this is YOLO object detection output
+                if is_yolo_detection(&shape) {
+                    info!(model = %job_model_name, shape = ?shape, "📊 Processing YOLO detections...");
+                    let t_post = std::time::Instant::now();
+                    
+                    // Use threshold 0.6 for clean inference results
+                    // sigmoid(0) = 0.5, so 0.6 filters out noise
+                    let mut detections = process_yolo_output(&values, &shape, 0.6, if job_model_name.starts_with("yolo") {640} else {256}, if job_model_name.starts_with("yolo") {640} else {256});
+                    
+                    // Debug: log score distribution
+                    if !detections.is_empty() {
+                        let max_conf = detections.iter().map(|d| d.confidence).fold(0.0f32, f32::max);
+                        let min_conf = detections.iter().map(|d| d.confidence).fold(1.0f32, f32::min);
+                        info!(model = %job_model_name, count = detections.len(), min_conf = min_conf, max_conf = max_conf, "📈 Detection score distribution");
+                    }
+                    
+                    let pre_nms_count = detections.len();
+                    // Cap to 50 before NMS (standard YOLO practice)
+                    if detections.len() > 50 {
+                        detections.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+                        detections.truncate(50);
+                    }
+                    let detections = nms(&mut detections, 0.45);
+                    let post_time_ms = t_post.elapsed().as_millis();
+                    info!(model = %job_model_name, pre_nms = pre_nms_count, post_nms = detections.len(), post_processing_ms = post_time_ms, "✅ YOLO post-processing complete");
+                    let mut result = serde_json::Map::new();
+                    result.insert("type".to_string(), serde_json::json!("object_detection"));
+                    result.insert("num_detections".to_string(), serde_json::json!(detections.len()));
+                    result.insert("detections".to_string(), serde_json::json!(detections));
+                    return serde_json::to_string(&result)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
+                }
+
+                // Check if this is ImageNet classification output
+                if is_imagenet_classification(&shape) {
+                    let sum: f32 = values.iter().sum();
+                    let is_already_softmaxed = (sum - 1.0).abs() < 0.1;
+                    let probabilities = if is_already_softmaxed { values.clone() } else { softmax(&values) };
+                    let top_5 = get_top_k_predictions(&probabilities, 5);
+                    let mut result = serde_json::Map::new();
+                    result.insert("type".to_string(), serde_json::json!("classification"));
+                    if let Some((class_id, confidence)) = top_5.first() {
+                        let label = get_imagenet_label(*class_id);
+                        result.insert("top_1".to_string(), serde_json::json!({"label": label, "class_id": class_id, "confidence": confidence}));
+                    }
+                    let top_5_json: Vec<serde_json::Value> = top_5.iter().map(|(class_id, confidence)| {
+                        let label = get_imagenet_label(*class_id);
+                        serde_json::json!({"label": label, "class_id": class_id, "confidence": confidence})
+                    }).collect();
+                    result.insert("top_5".to_string(), serde_json::json!(top_5_json));
+                    return serde_json::to_string(&result)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
+                }
+
+                // Default: return raw output
+                let result = serde_json::json!({"type": "raw", "shape": shape, "values": values});
+                serde_json::to_string(&result).map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)))
+            }).await.map_err(|e| InferenceError::ExecutionFailed(format!("Inference thread join error: {}", e)))?;
+
+            let output_json = run_result?;
 
             // Create a temporary result for metadata storage
             let temp_result = InferenceResult::success(
@@ -1432,9 +1677,10 @@ pub mod worker {
             use image::imageops::FilterType;
 
             // Helper to decode image bytes, resize and return RGB byte vector
+            // Using Triangle filter instead of Lanczos3 for speed (saves 10-20ms)
             fn decode_and_resize(bytes: &[u8], w: u32, h: u32) -> std::result::Result<Vec<u8>, String> {
                 let img = image::load_from_memory(bytes).map_err(|e| format!("Image decode failed: {}", e))?;
-                let img = img.resize_exact(w, h, FilterType::Lanczos3).to_rgb8();
+                let img = img.resize_exact(w, h, FilterType::Triangle).to_rgb8();
                 Ok(img.into_raw())
             }
 
@@ -1486,14 +1732,19 @@ pub mod worker {
                 
                 // Check if this is YOLO object detection output
                 if is_yolo_detection(&shape) {
-                    let mut detections = process_yolo_output(&values, &shape, 0.25);
+                    // Use input image size from shape inference or job defaults (assume normalized coords)
+                    // We'll assume pixel scaling based on common input sizes (224/256/640)
+                    let input_w = if _job.model_name.starts_with("yolo") { 640usize } else { 256usize };
+                    let input_h = input_w;
+
+                    let mut detections = process_yolo_output(&values, &shape, 0.25, input_w, input_h);
                     let detections = nms(&mut detections, 0.45);
-                    
+
                     let mut result = serde_json::Map::new();
                     result.insert("type".to_string(), serde_json::json!("object_detection"));
                     result.insert("num_detections".to_string(), serde_json::json!(detections.len()));
                     result.insert("detections".to_string(), serde_json::json!(detections));
-                    
+
                     return serde_json::to_string(&result)
                         .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
                 }
