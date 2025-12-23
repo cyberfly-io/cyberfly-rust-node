@@ -1493,8 +1493,32 @@ pub mod worker {
                         }
                     }
                 }
+            } else if job.model_name.starts_with("yolo") {
+                // YOLO expects BGR order (Ultralytics default), NOT RGB!
+                // Input data is RGB from image decoder, need to swap R and B channels
+                for h in 0..height {
+                    for w in 0..width {
+                        let pixel_idx = (h * width + w) * 3;
+                        
+                        // Read RGB from input
+                        let r = if pixel_idx < input_data.len() { input_data[pixel_idx] } else { 0 };
+                        let g = if pixel_idx + 1 < input_data.len() { input_data[pixel_idx + 1] } else { 0 };
+                        let b = if pixel_idx + 2 < input_data.len() { input_data[pixel_idx + 2] } else { 0 };
+                        
+                        // Normalize to [0, 1]
+                        let r_norm = r as f32 / 255.0;
+                        let g_norm = g as f32 / 255.0;
+                        let b_norm = b as f32 / 255.0;
+                        
+                        // Write as BGR in NCHW format
+                        // Channel 0 = B, Channel 1 = G, Channel 2 = R
+                        float_data[0 * height * width + h * width + w] = b_norm;
+                        float_data[1 * height * width + h * width + w] = g_norm;
+                        float_data[2 * height * width + h * width + w] = r_norm;
+                    }
+                }
             } else {
-                // YOLO and others: simple [0, 1] normalization in NCHW format
+                // Other models: simple [0, 1] normalization in RGB NCHW format
                 for h in 0..height {
                     for w in 0..width {
                         let pixel_idx = (h * width + w) * 3;
