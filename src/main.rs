@@ -671,24 +671,40 @@ async fn main() -> Result<()> {
     // Create outbound sync channel so other components (GraphQL) can send SyncMessage to network
     let (sync_out_tx, sync_out_rx) = tokio::sync::mpsc::unbounded_channel::<crate::sync::SyncMessage>();
 
-    let graphql_server = graphql::create_server(
-        storage.clone(),
-        ipfs,
-        Some(sync_manager),
-        Some(endpoint_for_graphql), // Pass endpoint instead of wrapped network
-        Some(discovered_peers_map), // Pass discovered peers map
-        None,   // IrohNetwork not needed - GraphQL uses Endpoint directly
-        Some(peer_registry.clone()), // Pass PeerRegistry for mesh summary
-        Some(network_resilience.clone()), // Pass NetworkResilience for circuit breaker, reputation, bandwidth
-        relay_url_with_public_ip, // Pass relay URL with public IP
-        mqtt_tx,
-        mqtt_to_gossip_tx,
-        mqtt_store,
-        Some(message_broadcast_tx.clone()),
-        Some(sync_out_tx.clone()),
-        Some(inference_scheduler),
-    )
-    .await?;
+    tracing::info!("🔧 Creating GraphQL server...");
+    let graphql_server = match tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        graphql::create_server(
+            storage.clone(),
+            ipfs,
+            Some(sync_manager),
+            Some(endpoint_for_graphql), // Pass endpoint instead of wrapped network
+            Some(discovered_peers_map), // Pass discovered peers map
+            None,   // IrohNetwork not needed - GraphQL uses Endpoint directly
+            Some(peer_registry.clone()), // Pass PeerRegistry for mesh summary
+            Some(network_resilience.clone()), // Pass NetworkResilience for circuit breaker, reputation, bandwidth
+            relay_url_with_public_ip, // Pass relay URL with public IP
+            mqtt_tx,
+            mqtt_to_gossip_tx,
+            mqtt_store,
+            Some(message_broadcast_tx.clone()),
+            Some(sync_out_tx.clone()),
+            Some(inference_scheduler),
+        )
+    ).await {
+        Ok(Ok(server)) => {
+            tracing::info!("✅ GraphQL server created successfully");
+            server
+        }
+        Ok(Err(e)) => {
+            tracing::error!("❌ GraphQL server creation failed: {}", e);
+            return Err(e);
+        }
+        Err(_) => {
+            tracing::error!("❌ GraphQL server creation timed out after 30s");
+            return Err(anyhow::anyhow!("GraphQL server creation timeout - possible resource exhaustion or deadlock"));
+        }
+    };
     tracing::info!("GraphQL server initialized with WebSocket subscription support");
 
     // Start network event loop on a dedicated Tokio runtime thread.
@@ -745,8 +761,25 @@ async fn main() -> Result<()> {
     });
 
     // Start GraphQL API server
-    let listener =
-        tokio::net::TcpListener::bind(format!("{}:{}", config.api_host, config.api_port)).await?;
+    tracing::info!("🔌 Binding API server to {}:{}", config.api_host, config.api_port);
+    let listener = match tokio::net::TcpListener::bind(
+        format!("{}:{}", config.api_host, config.api_port)
+    ).await {
+        Ok(l) => {
+            tracing::info!("✅ API server bound successfully");
+            l
+        }
+        Err(e) => {
+            tracing::error!(
+                "❌ Failed to bind API server to {}:{} - {}",
+                config.api_host,
+                config.api_port,
+                e
+            );
+            tracing::error!("   Port may already be in use or insufficient permissions");
+            return Err(e.into());
+        }
+    };
     
     // Get public IP for informational logging
     let api_public_ip = match kadena::get_public_ip().await {
