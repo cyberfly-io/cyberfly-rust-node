@@ -102,21 +102,21 @@ pub const DEFAULT_MODELS: &[(&str, &str, u64)] = &[
     // PaddleOCR v5 Text Detection (MNN format for ocr-rs)
     (
         "paddleocr_det",
-        "https://raw.githubusercontent.com/zibo-chen/rust-paddle-ocr/refs/heads/next/models/PP-OCRv5_mobile_det.mnn",
+        "https://raw.githubusercontent.com/cyberfly-io/cv_models/refs/heads/main/paddleocr_det.mnn",
         3_000_000, // ~3MB
     ),
     
     // PaddleOCR v5 English Recognition (MNN format for ocr-rs)
     (
         "paddleocr_rec_en",
-        "https://raw.githubusercontent.com/zibo-chen/rust-paddle-ocr/refs/heads/next/models/en_PP-OCRv5_mobile_rec_infer.mnn",
+        "https://raw.githubusercontent.com/cyberfly-io/cv_models/refs/heads/main/paddleocr_rec_en.mnn",
         5_000_000, // ~5MB
     ),
     
     // PaddleOCR v5 Character Dictionary (English)
     (
         "paddleocr_keys_en",
-        "https://raw.githubusercontent.com/zibo-chen/rust-paddle-ocr/refs/heads/next/models/ppocr_keys_en.txt",
+        "https://raw.githubusercontent.com/cyberfly-io/cv_models/refs/heads/main/paddleocr_keys_en.txt",
         100_000, // ~100KB
     ),
     
