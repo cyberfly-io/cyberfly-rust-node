@@ -92,18 +92,32 @@ pub const DEFAULT_MODELS: &[(&str, &str, u64)] = &[
         8_000_000, // ~8MB (approximate)
     ),
     
-    // Image Segmentation - SegFormer B0 (ADE20K)
+    // Image Segmentation - SegFormer B0 (Cityscapes)
     (
         "segformer",
-        "https://huggingface.co/nvidia/segformer-b0-finetuned-ade-512-512/resolve/main/onnx/model.onnx",
+        "https://raw.githubusercontent.com/cyberfly-io/cv_models/refs/heads/main/segformer.onnx",
         15_000_000, // ~15MB
     ),
     
-    // Text Recognition - EasyOCR Sequence Modeler (English)
+    // PaddleOCR v5 Text Detection (MNN format for ocr-rs)
     (
-        "easyocr_en",
-        "https://github.com/tulasiram58827/ocr_tflite/raw/main/models/easyocr_onnx/sequence_modeller.onnx",
-        10_000_000, // ~10MB
+        "paddleocr_det",
+        "https://raw.githubusercontent.com/zibo-chen/rust-paddle-ocr/refs/heads/next/models/PP-OCRv5_mobile_det.mnn",
+        3_000_000, // ~3MB
+    ),
+    
+    // PaddleOCR v5 English Recognition (MNN format for ocr-rs)
+    (
+        "paddleocr_rec_en",
+        "https://raw.githubusercontent.com/zibo-chen/rust-paddle-ocr/refs/heads/next/models/en_PP-OCRv5_mobile_rec_infer.mnn",
+        5_000_000, // ~5MB
+    ),
+    
+    // PaddleOCR v5 Character Dictionary (English)
+    (
+        "paddleocr_keys_en",
+        "https://raw.githubusercontent.com/zibo-chen/rust-paddle-ocr/refs/heads/next/models/ppocr_keys_en.txt",
+        100_000, // ~100KB
     ),
     
     // Speech Processing - Silero VAD (ONNX)
@@ -122,7 +136,7 @@ pub const DEFAULT_MODELS: &[(&str, &str, u64)] = &[
 ];
 
 /// Maximum model size to auto-download (50MB)
-pub const MAX_AUTO_DOWNLOAD_SIZE: u64 = 50 * 1024 * 1024;
+pub const MAX_AUTO_DOWNLOAD_SIZE: u64 = 100 * 1024 * 1024;
 
 /// Download default models to the specified directory if not already present.
 /// Returns a list of (model_name, success, message) tuples.
@@ -132,7 +146,9 @@ pub async fn ensure_models_downloaded(
     let mut results = Vec::new();
     
     for (model_name, url, expected_size) in DEFAULT_MODELS {
-        let model_path = models_dir.join(format!("{}.onnx", model_name));
+        // Extract file extension from URL (supports .onnx, .mnn, .txt, etc.)
+        let extension = url.rsplit('.').next().unwrap_or("onnx");
+        let model_path = models_dir.join(format!("{}.{}", model_name, extension));
         
         if model_path.exists() {
             info!("✓ Model {} already exists at {:?}", model_name, model_path);
@@ -180,6 +196,47 @@ pub async fn ensure_models_downloaded(
         }
     } else {
         info!("✓ ImageNet labels already exist at {:?}", labels_path);
+    }
+    
+    // Download PaddleOCR v5 English dictionary for CTC decoding
+    // Use the official PaddleOCR ppocrv5 English dict from the PaddlePaddle repo.
+    // If an existing file is present but looks suspiciously small (likely a different dict),
+    // re-download and overwrite it.
+    let dict_path = models_dir.join("paddleocr_dict_en.txt");
+    let dict_url = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.4.0/paddle/PP-OCRv5/rec/en_PP-OCRv5_rec_mobile_infer/ppocrv5_en_dict.txt";
+
+    let mut need_download = false;
+    if dict_path.exists() {
+        // Check approximate line count to detect stale/small dicts
+        match tokio::fs::read_to_string(&dict_path).await {
+            Ok(content) => {
+                let lines = content.lines().count();
+                if lines < 1000 {
+                    warn!("Existing PaddleOCR keys at {:?} looks small ({} lines); re-downloading.", dict_path, lines);
+                    need_download = true;
+                } else {
+                    info!("✓ PaddleOCR keys already exist at {:?} ({} lines)", dict_path, lines);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to read existing PaddleOCR keys at {:?}: {} — will attempt download", dict_path, e);
+                need_download = true;
+            }
+        }
+    } else {
+        need_download = true;
+    }
+
+    if need_download {
+        info!("📥 Downloading PaddleOCR English keys (ppocr_keys_v1) from {}...", dict_url);
+        match download_model(dict_url, &dict_path).await {
+            Ok(size) => {
+                info!("✅ Downloaded PaddleOCR keys ({} bytes) to {:?}", size, dict_path);
+            }
+            Err(e) => {
+                error!("❌ Failed to download PaddleOCR keys: {}", e);
+            }
+        }
     }
     
     results
@@ -564,9 +621,13 @@ const SEGMENTATION_LABELS: &[&str] = &[
 /// Check if output shape matches segmentation format
 fn is_segmentation(shape: &[usize]) -> bool {
     // Segmentation outputs: [1, num_classes, H, W] or [1, H, W, num_classes]
+    // Accept models with larger class counts (e.g., 256, 512) and modest H/W
     match shape {
-        [1, c, h, w] if *c < 200 && *h > *c && *w > *c => true,
-        [1, h, w, c] if *c < 200 && *h > *c && *w > *c => true,
+        // Channel-first: [1, classes, H, W]
+        // Require at least 2 classes and a reasonable spatial size
+        [1, c, h, w] if *c > 1 && *h >= 4 && *w >= 4 => true,
+        // Channel-last: [1, H, W, classes]
+        [1, h, w, c] if *c > 1 && *h >= 4 && *w >= 4 => true,
         _ => false,
     }
 }
@@ -584,37 +645,80 @@ fn is_ocr_output(shape: &[usize]) -> bool {
 
 /// Process segmentation output
 fn process_segmentation_output(output: &[f32], shape: &[usize]) -> serde_json::Value {
-    let (num_classes, height, width) = match shape {
-        [1, c, h, w] => (*c, *h, *w),
-        [1, h, w, c] => (*c, *h, *w),
+    // Determine layout and dims
+    let (num_classes, height, width, layout) = match shape {
+        [1, c, h, w] => (*c, *h, *w, "channel_first"),
+        [1, h, w, c] => (*c, *h, *w, "channel_last"),
         _ => return serde_json::json!({"error": "Invalid segmentation shape"}),
     };
-    
-    // Find unique classes present in the segmentation
-    let mut classes_present = std::collections::HashSet::new();
-    
-    // Sample the segmentation mask (don't process every pixel for efficiency)
-    let sample_rate = (height * width / 1000).max(1);
-    for i in (0..output.len()).step_by(sample_rate) {
-        let class_id = (output[i] as usize).min(num_classes - 1);
-        classes_present.insert(class_id);
+
+    // For segmentation logits, compute argmax per-pixel across classes
+    let hw = height * width;
+    if output.len() < num_classes * hw {
+        return serde_json::json!({"error": "Output length does not match expected segmentation size"});
     }
-    
-    let classes_detected: Vec<String> = classes_present
-        .iter()
-        .map(|&id| {
-            SEGMENTATION_LABELS.get(id)
-                .unwrap_or(&"unknown")
-                .to_string()
-        })
+
+    let mut class_counts = vec![0usize; num_classes];
+
+    if layout == "channel_first" {
+        // output layout: [1, C, H, W] flattened as C major then H then W
+        for y in 0..height {
+            for x in 0..width {
+                let mut best_class = 0usize;
+                let mut best_score = f32::NEG_INFINITY;
+                let pixel_offset = y * width + x;
+                for c in 0..num_classes {
+                    let idx = c * hw + pixel_offset;
+                    let v = output[idx];
+                    if v > best_score {
+                        best_score = v;
+                        best_class = c;
+                    }
+                }
+                class_counts[best_class] += 1;
+            }
+        }
+    } else {
+        // channel_last: [1, H, W, C] flattened as (H*W)*C with classes fastest
+        for y in 0..height {
+            for x in 0..width {
+                let mut best_class = 0usize;
+                let mut best_score = f32::NEG_INFINITY;
+                let base = (y * width + x) * num_classes;
+                for c in 0..num_classes {
+                    let idx = base + c;
+                    let v = output[idx];
+                    if v > best_score {
+                        best_score = v;
+                        best_class = c;
+                    }
+                }
+                class_counts[best_class] += 1;
+            }
+        }
+    }
+
+    let classes_detected: Vec<String> = class_counts.iter().enumerate()
+        .filter(|(_, &count)| count > 0)
+        .map(|(id, _)| SEGMENTATION_LABELS.get(id).unwrap_or(&"unknown").to_string())
         .collect();
-    
+
+    // Provide counts for detected classes
+    let mut counts_map = serde_json::Map::new();
+    for (id, &count) in class_counts.iter().enumerate() {
+        if count > 0 {
+            let label = SEGMENTATION_LABELS.get(id).unwrap_or(&"unknown").to_string();
+            counts_map.insert(label, serde_json::json!(count));
+        }
+    }
+
     serde_json::json!({
         "type": "segmentation",
         "num_classes": num_classes,
         "mask_shape": [height, width],
         "classes_detected": classes_detected,
-        "note": "Full segmentation mask available in raw output"
+        "class_counts": counts_map,
+        "note": "Mask is low-resolution logits (per-pixel argmax). Upsample to input resolution for visualization"
     })
 }
 
@@ -654,6 +758,757 @@ fn process_ocr_output(output: &[f32], shape: &[usize]) -> serde_json::Value {
     })
 }
 
+// ============================================================================
+// PaddleOCR Detection and Recognition
+// ============================================================================
+
+/// Load PaddleOCR dictionary for CTC decoding
+/// PaddleOCR dict.txt format: each line is one character
+/// Index 0 maps to first character, blank token is at the LAST position (vocab_size - 1)
+pub fn get_paddleocr_dictionary() -> Vec<String> {
+    use std::sync::OnceLock;
+    static DICT: OnceLock<Vec<String>> = OnceLock::new();
+    
+    DICT.get_or_init(|| {
+        let dict_path = std::path::Path::new("./data/iroh/models/paddleocr_dict_en.txt");
+        if dict_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(dict_path) {
+                let chars: Vec<String> = content.lines()
+                    .map(|s| s.to_string())
+                    .collect();
+                info!("📖 Loaded PaddleOCR dictionary with {} characters", chars.len());
+                return chars;
+            }
+        }
+        // Fallback: basic ASCII characters (95 printable chars)
+        let chars: Vec<String> = (' '..='~').map(|c| c.to_string()).collect();
+        warn!("⚠️ PaddleOCR dictionary not found, using ASCII fallback ({} chars)", chars.len());
+        chars
+    }).clone()
+}
+
+/// Check if output shape matches PaddleOCR detection format
+/// Detection outputs a probability map: [1, 1, H, W]
+fn is_paddleocr_detection(shape: &[usize]) -> bool {
+    match shape {
+        // Probability map output: [1, 1, H, W]
+        [1, 1, h, w] if *h >= 8 && *w >= 8 => true,
+        _ => false,
+    }
+}
+
+/// Check if output shape matches PaddleOCR recognition format
+/// Recognition outputs CTC logits: [1, seq_len, vocab_size] or [seq_len, vocab_size]
+fn is_paddleocr_recognition(shape: &[usize]) -> bool {
+    match shape {
+        // PaddleOCR v5: [1, vocab_size, seq_len] where vocab_size is typically ~6000-7000 for English
+        [1, vocab, seq_len] if *vocab > 50 && *vocab < 10000 && *seq_len > 10 => true,
+        // Some models output: [vocab_size, seq_len]
+        [vocab, seq_len] if *vocab > 50 && *vocab < 10000 && *seq_len > 10 => true,
+        _ => false,
+    }
+}
+
+/// Process PaddleOCR detection output to extract text bounding boxes
+/// 
+/// Input: probability map [1, 1, H, W] where each pixel indicates text probability
+/// Output: list of bounding boxes [x1, y1, x2, y2] in normalized coordinates
+/// 
+/// Proper DBNet pipeline:
+/// 1. Apply sigmoid to logits, then threshold (0.3-0.4)
+/// 2. Apply morphological dilation (3x3) to connect fragmented text
+/// 3. Find connected components (contours)
+/// 4. Extract bounding boxes with expansion
+fn process_paddleocr_detection(
+    output: &[f32], 
+    shape: &[usize], 
+    threshold: f32,
+    scaled_w: usize,  // Actual content width (before padding)
+    scaled_h: usize,  // Actual content height (before padding)
+) -> Vec<[f32; 4]> {
+    let mut boxes = Vec::new();
+    
+    let (height, width) = match shape {
+        [1, 1, h, w] => (*h, *w),
+        _ => return boxes,
+    };
+    
+    // NOTE: Some PaddleOCR DBNet ONNX exports (e.g. monkt/paddleocr-onnx v5)
+    // already output PROBABILITY MAPS (values in [0,1]). Do NOT re-sigmoid
+    // those outputs or probabilities will collapse toward 0.6 and be
+    // thresholded away. We'll treat the raw `output` as probabilities.
+    // For safety, log the observed min/max before thresholding.
+    let (min_p, max_p) = output.iter().take(height * width).fold(
+        (f32::INFINITY, f32::NEG_INFINITY),
+        |(min, max), &v| (min.min(v), max.max(v)),
+    );
+    info!(min_p, max_p, "DBNet prob range");
+
+    // Step 1: Create binary mask by thresholding probability map
+    let mut binary = vec![false; height * width];
+    for i in 0..output.len().min(height * width) {
+        let prob = output[i]; // already a probability for v5 models
+        binary[i] = prob >= threshold;
+    }
+    
+    // CRITICAL FIX: Mask padding region BEFORE dilation
+    // DBNet sees padded pixels as valid input, causing full-width boxes
+    // We must zero out probability in padded region before contour extraction
+    let valid_w = scaled_w as f32 / width as f32;
+    let valid_h = scaled_h as f32 / height as f32;
+    
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y * width + x;
+            
+            // Normalized pixel center
+            let nx = (x as f32 + 0.5) / width as f32;
+            let ny = (y as f32 + 0.5) / height as f32;
+            
+            // MASK padding region (beyond actual content)
+            if nx > valid_w || ny > valid_h {
+                binary[idx] = false;
+            }
+        }
+    }
+    
+    // Step 2: Morphological dilation (3x3 kernel) - DISABLED for printed text
+    // Dilation hurts printed text by merging across lines
+    // Re-enable only for handwritten/broken fonts
+    let dilated = binary.clone(); // DISABLED: was morphological dilation
+    
+    // OLD CODE (kept for reference):
+    // let mut dilated = vec![false; height * width];
+    // for y in 0..height {
+    //     for x in 0..width {
+    //         let mut any_set = false;
+    //         for dy in -1i32..=1 {
+    //             for dx in -1i32..=1 {
+    //                 let ny = y as i32 + dy;
+    //                 let nx = x as i32 + dx;
+    //                 if ny >= 0 && ny < height as i32 && nx >= 0 && nx < width as i32 {
+    //                     if binary[ny as usize * width + nx as usize] {
+    //                         any_set = true;
+    //                         break;
+    //                     }
+    //                 }
+    //             }
+    //             if any_set { break; }
+    //         }
+    //         dilated[y * width + x] = any_set;
+    //     }
+    // }
+    
+    // Step 3: Find connected components (contours) using flood-fill on dilated mask
+    let mut visited = vec![false; height * width];
+    
+    for start_y in 0..height {
+        for start_x in 0..width {
+            let idx = start_y * width + start_x;
+            if visited[idx] || !dilated[idx] {
+                continue;
+            }
+            
+            // Flood fill to find connected region
+            let mut min_x = start_x;
+            let mut max_x = start_x;
+            let mut min_y = start_y;
+            let mut max_y = start_y;
+            let mut pixel_count = 0usize;
+            let mut stack = vec![(start_x, start_y)];
+            
+            while let Some((x, y)) = stack.pop() {
+                let idx = y * width + x;
+                if visited[idx] || !dilated[idx] {
+                    continue;
+                }
+                visited[idx] = true;
+                pixel_count += 1;
+                
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+                
+                // 8-connectivity for better text grouping
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        if dx == 0 && dy == 0 { continue; }
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                            stack.push((nx as usize, ny as usize));
+                        }
+                    }
+                }
+            }
+            
+            // Step 4: Filter and expand boxes
+            let box_w = max_x - min_x + 1;
+            let box_h = max_y - min_y + 1;
+            
+            // Filter: minimum size and minimum fill ratio (avoid noise)
+            let fill_ratio = pixel_count as f32 / (box_w * box_h) as f32;
+            let min_width = (width as f32 * 0.01) as usize; // At least 1% of image width
+            let min_height = (height as f32 * 0.005) as usize; // At least 0.5% of image height
+            
+            // Text boxes should be wider than tall (aspect ratio > 1.2 for text lines)
+            let aspect_ratio = box_w as f32 / box_h.max(1) as f32;
+            
+            // Relaxed filtering for printed book text:
+            // Book characteristics: thin serif fonts, large margins, low stroke density
+            // - Minimum pixel count of 30 (thin serif text can be small)
+            // - Aspect ratio > 1.0 (text lines are horizontal)
+            // - Reject boxes that span nearly full width (background noise)
+            // - Lower fill ratio threshold for thin fonts
+                // box filtering logic
+                let is_near_full_width = box_w as f32 / width as f32 > 0.97;
+                let is_valid_size = pixel_count >= 30;
+                let is_valid_aspect = aspect_ratio > 1.0 || (box_w > 30 && box_h < 80);
+                let is_valid_fill = fill_ratio > 0.02;
+                
+                let accepted = is_valid_size && is_valid_aspect && is_valid_fill && !is_near_full_width;
+
+                if !accepted {
+                    // Log rejection reason for debugging
+                    debug!(
+                        "⛔ Rejecting box at {},{}: {}x{} px={} aspect={:.2} fill={:.3} (size={}, asp={}, fill={}, !full={})",
+                        min_x, min_y, box_w, box_h, pixel_count, aspect_ratio, fill_ratio,
+                        is_valid_size, is_valid_aspect, is_valid_fill, !is_near_full_width
+                    );
+                } else {
+                    debug!(
+                        "✅ Accepting box at {},{}: {}x{} px={} aspect={:.2} fill={:.3}",
+                        min_x, min_y, box_w, box_h, pixel_count, aspect_ratio, fill_ratio
+                    );
+                }
+
+                if accepted {
+                    
+                    // Expand box by 2-3 pixels in each direction (DBNet recommended)
+                    let expand_x = (width as f32 * 0.003).max(3.0) as usize;
+                    let expand_y = (height as f32 * 0.002).max(2.0) as usize;
+                    
+                    let x1 = min_x.saturating_sub(expand_x);
+                    let y1 = min_y.saturating_sub(expand_y);
+                    let x2 = (max_x + expand_x + 1).min(width);
+                    let y2 = (max_y + expand_y + 1).min(height);
+                    
+                    // Normalize coordinates
+                    boxes.push([
+                        x1 as f32 / width as f32,
+                        y1 as f32 / height as f32,
+                        x2 as f32 / width as f32,
+                        y2 as f32 / height as f32,
+                    ]);
+                }
+        }
+    }
+    
+    // Step 5: Merge overlapping boxes (text lines that got split)
+    boxes = merge_overlapping_boxes(boxes);
+    
+    // Step 6: Sort boxes by y position (top to bottom), then x (left to right)
+    boxes.sort_by(|a, b| {
+        // Group by lines - if y centers are within 2% of each other, treat as same line
+        let a_y_center = (a[1] + a[3]) / 2.0;
+        let b_y_center = (b[1] + b[3]) / 2.0;
+        if (a_y_center - b_y_center).abs() < 0.02 {
+            a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal)
+        } else {
+            a[1].partial_cmp(&b[1]).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    });
+    
+    boxes
+}
+
+/// Merge overlapping bounding boxes
+fn merge_overlapping_boxes(boxes: Vec<[f32; 4]>) -> Vec<[f32; 4]> {
+    if boxes.len() <= 1 {
+        return boxes;
+    }
+    
+    let mut merged = boxes.clone();
+    let mut changed = true;
+    
+    while changed {
+        changed = false;
+        let mut new_merged = Vec::new();
+        let mut used = vec![false; merged.len()];
+        
+        for i in 0..merged.len() {
+            if used[i] { continue; }
+            
+            let mut current = merged[i];
+            used[i] = true;
+            
+            for j in (i + 1)..merged.len() {
+                if used[j] { continue; }
+                
+                let other = merged[j];
+                
+                // FIXED: Tighter thresholds for printed text (was too aggressive)
+                // Old: gap_threshold=0.02, y_diff=0.03 would merge paragraphs
+                // New: gap_threshold=0.005, y_diff=0.012 for printed books
+                let gap_threshold = 0.005;
+                let x_overlap = current[2] + gap_threshold >= other[0] && other[2] + gap_threshold >= current[0];
+                let y_overlap = current[3] + gap_threshold >= other[1] && other[3] + gap_threshold >= current[1];
+                
+                // Check if on same line (tighter vertical threshold)
+                let current_y_center = (current[1] + current[3]) / 2.0;
+                let other_y_center = (other[1] + other[3]) / 2.0;
+                let same_line = (current_y_center - other_y_center).abs() < 0.012;
+                
+                if x_overlap && y_overlap && same_line {
+                    // Merge boxes
+                    current[0] = current[0].min(other[0]);
+                    current[1] = current[1].min(other[1]);
+                    current[2] = current[2].max(other[2]);
+                    current[3] = current[3].max(other[3]);
+                    used[j] = true;
+                    changed = true;
+                }
+            }
+            
+            new_merged.push(current);
+        }
+        
+        merged = new_merged;
+    }
+    
+    merged
+}
+
+/// Rotate an RGB image by specified angle (0, 90, 180, 270 degrees)
+/// Returns rotated image buffer and new dimensions
+fn rotate_image(rgb_data: &[u8], width: u32, height: u32, angle: u32) -> Option<(Vec<u8>, u32, u32)> {
+    if angle == 0 {
+        return Some((rgb_data.to_vec(), width, height));
+    }
+    
+    let img = image::RgbImage::from_raw(width, height, rgb_data.to_vec())?;
+    let dyn_img = image::DynamicImage::ImageRgb8(img);
+    
+    let rotated = match angle {
+        90 => dyn_img.rotate90(),
+        180 => dyn_img.rotate180(),
+        270 => dyn_img.rotate270(),
+        _ => return None,
+    };
+    
+    let rotated_rgb = rotated.to_rgb8();
+    let new_width = rotated_rgb.width();
+    let new_height = rotated_rgb.height();
+    
+    Some((rotated_rgb.into_raw(), new_width, new_height))
+}
+
+/// Detect document orientation using PP-LCNet model (0°, 90°, 180°, 270°)
+/// Returns the rotation angle needed to correct the document
+fn detect_document_orientation(
+    img: &image::DynamicImage,
+    ori_session: &std::sync::Arc<std::sync::Mutex<ort::session::Session>>,
+) -> Option<u32> {
+    use image::imageops::FilterType;
+    
+    // Model expects 192x192 input
+    let input_size = 192u32;
+    let resized = img.resize_exact(input_size, input_size, FilterType::Triangle);
+    let rgb = resized.to_rgb8();
+    
+    // Normalize to [0, 1] range (standard ImageNet preprocessing)
+    let mut float_data = vec![0.0f32; 3 * input_size as usize * input_size as usize];
+    for y in 0..input_size {
+        for x in 0..input_size {
+            let pixel = rgb.get_pixel(x, y);
+            for c in 0..3 {
+                let val = pixel[c] as f32 / 255.0;
+                let idx = c * (input_size * input_size) as usize + (y * input_size + x) as usize;
+                float_data[idx] = val;
+            }
+        }
+    }
+    
+    // Create input tensor (NCHW format)
+    let input_array = ndarray::Array4::<f32>::from_shape_vec(
+        (1, 3, input_size as usize, input_size as usize),
+        float_data,
+    ).ok()?;
+    
+    // Run inference
+    let output = {
+        let mut session_lock = ori_session.lock().ok()?;
+        let input_name = session_lock.inputs.first()
+            .map(|i| i.name.clone())
+            .unwrap_or_else(|| "input".to_string());
+        let tensor_ref = ort::value::TensorRef::from_array_view(&input_array).ok()?;
+        let outs = session_lock.run(ort::inputs![input_name.as_str() => tensor_ref]).ok()?;
+        
+        let (_, output_value) = outs.iter().next()?;
+        let array = output_value.try_extract_array::<f32>().ok()?;
+        array.iter().cloned().collect::<Vec<f32>>()
+    };
+    
+    // Output shape is (1, 4) for 4 classes: [0°, 90°, 180°, 270°]
+    if output.len() < 4 {
+        return None;
+    }
+    
+    // Find argmax
+    let (predicted_class, _) = output.iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
+    
+    // Map class to rotation angle needed to correct
+    // If image is detected as 90° CW, we need to rotate 270° CW (or 90° CCW) to correct it
+    let correction_angle = match predicted_class {
+        0 => 0,   // Image is correct (0°)
+        1 => 270, // Image is 90° CW, rotate 270° CW (or 90° CCW) to correct
+        2 => 180, // Image is upside down, rotate 180° to correct
+        3 => 90,  // Image is 270° CW (90° CCW), rotate 90° CW to correct
+        _ => 0,
+    };
+    
+    Some(correction_angle)
+}
+
+/// Detect text line orientation using PP-LCNet model (0° vs 180°)
+/// Returns true if 180° rotation is needed
+fn detect_textline_orientation(
+    crop_rgb: &[u8],
+    width: u32,
+    height: u32,
+    ori_session: &std::sync::Arc<std::sync::Mutex<ort::session::Session>>,
+) -> Option<bool> {
+    use image::imageops::FilterType;
+    
+    info!("DEBUG: detect_textline_orientation called with crop {}x{}, rgb_len={}", width, height, crop_rgb.len());
+    
+    // Model expects 80x160 input (height x width) - verified from ONNX model
+    let input_h = 80u32;
+    let input_w = 160u32;
+    
+    let img = match image::RgbImage::from_raw(width, height, crop_rgb.to_vec()) {
+        Some(i) => {
+            info!("DEBUG: Image created successfully");
+            i
+        }
+        None => {
+            warn!("DEBUG: Failed to create RgbImage from raw bytes");
+            return None;
+        }
+    };
+    let dyn_img = image::DynamicImage::ImageRgb8(img);
+    let resized = dyn_img.resize_exact(input_w, input_h, FilterType::Triangle);
+    let rgb = resized.to_rgb8();
+    info!("DEBUG: Image resized to {}x{}", input_w, input_h);
+    
+    // Normalize to [0, 1] range
+    let mut float_data = vec![0.0f32; 3 * input_h as usize * input_w as usize];
+    for y in 0..input_h {
+        for x in 0..input_w {
+            let pixel = rgb.get_pixel(x, y);
+            for c in 0..3 {
+                let val = pixel[c] as f32 / 255.0;
+                let idx = c * (input_h * input_w) as usize + (y * input_w + x) as usize;
+                float_data[idx] = val;
+            }
+        }
+    }
+    
+    // Create input tensor (NCHW format)
+    let input_array = match ndarray::Array4::<f32>::from_shape_vec(
+        (1, 3, input_h as usize, input_w as usize),
+        float_data,
+    ) {
+        Ok(arr) => {
+            info!("DEBUG: Input tensor created");
+            arr
+        }
+        Err(e) => {
+            warn!("DEBUG: Failed to create input tensor: {}", e);
+            return None;
+        }
+    };
+    
+    // Run inference
+    let output = {
+        let mut session_lock = match ori_session.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("DEBUG: Failed to lock session: {}", e);
+                return None;
+            }
+        };
+        let input_name = session_lock.inputs.first()
+            .map(|i| i.name.clone())
+            .unwrap_or_else(|| "input".to_string());
+        let tensor_ref = match ort::value::TensorRef::from_array_view(&input_array) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("DEBUG: Failed to create tensor ref: {}", e);
+                return None;
+            }
+        };
+        let outs = match session_lock.run(ort::inputs![input_name.as_str() => tensor_ref]) {
+            Ok(o) => {
+                info!("DEBUG: ONNX inference succeeded");
+                o
+            }
+            Err(e) => {
+                warn!("DEBUG: ONNX inference failed: {}", e);
+                return None;
+            }
+        };
+        
+        let (_, output_value) = match outs.iter().next() {
+            Some(v) => v,
+            None => {
+                warn!("DEBUG: No output from ONNX");
+                return None;
+            }
+        };
+        let array = match output_value.try_extract_array::<f32>() {
+            Ok(a) => a,
+            Err(e) => {
+                warn!("DEBUG: Failed to extract output array: {}", e);
+                return None;
+            }
+        };
+        array.iter().cloned().collect::<Vec<f32>>()
+    };
+    
+    info!("DEBUG: Output extracted, len={}", output.len());
+    
+    // Output shape is (1, 2) for 2 classes: [0°, 180°]
+    if output.len() < 2 {
+        return None;
+    }
+    
+    // Find argmax
+    let (predicted_class, _) = output.iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
+    
+    // Return true if 180° rotation is needed
+    Some(predicted_class == 1)
+}
+
+/// CTC greedy decoding for PaddleOCR recognition output
+/// 
+/// CRITICAL: PaddleOCR v5 ONNX outputs [1, vocab_size, seq_len] (CHANNEL-MAJOR)
+/// NOT [1, seq_len, vocab_size] (time-major)
+/// 
+/// This means we must iterate vocab dimension for each timestep, not slice contiguous memory.
+/// Correct order: Argmax -> Collapse Repeats -> Skip Blank -> Map
+fn ctc_decode(output: &[f32], shape: &[usize], dictionary: &[String]) -> (String, f32) {
+    // FIXED: Correct axis interpretation for PaddleOCR v5
+    // Shape is [1, vocab_size, seq_len] or [vocab_size, seq_len]
+    let (vocab_size, seq_len) = match shape {
+        [1, v, s] => (*v, *s),
+        [v, s] => (*v, *s),
+        _ => {
+            warn!("Unexpected CTC output shape: {:?}", shape);
+            return (String::new(), 0.0);
+        }
+    };
+    
+    info!("🔍 CTC decode: vocab_size={}, seq_len={}, output_len={}", vocab_size, seq_len, output.len());
+    
+    // In PaddleOCR, blank token is at the LAST index
+    let blank_idx = vocab_size.saturating_sub(1);
+
+    let mut result = String::new();
+    let mut prev_idx: Option<usize> = None;
+    let mut confidence_sum = 0.0f32;
+    let mut count = 0;
+    
+    // Iterate over time steps
+    for t in 0..seq_len {
+        let mut max_idx = blank_idx;
+        let mut max_logit = f32::NEG_INFINITY;
+        
+        // FIXED: Iterate vocab dimension for channel-major layout
+        // Index formula: v * seq_len + t (NOT t * vocab_size + v)
+        for v in 0..vocab_size {
+            let idx = v * seq_len + t;
+            if idx >= output.len() {
+                warn!("CTC decode: index {} out of bounds (len={})", idx, output.len());
+                break;
+            }
+            
+            let logit = output[idx];
+            if logit > max_logit {
+                max_logit = logit;
+                max_idx = v;
+            }
+        }
+        
+        // 1. Collapse repeats FIRST
+        if Some(max_idx) == prev_idx {
+            continue;
+        }
+        prev_idx = Some(max_idx);
+        
+        // 2. Skip blank
+        if max_idx == blank_idx {
+            continue;
+        }
+        
+        // 3. Map index to dictionary
+        if max_idx < dictionary.len() {
+            result.push_str(&dictionary[max_idx]);
+            
+            // Softmax probability calculation
+            let mut exp_sum = 0.0f32;
+            for v in 0..vocab_size {
+                let idx = v * seq_len + t;
+                if idx < output.len() {
+                    exp_sum += output[idx].exp();
+                }
+            }
+            let prob = if exp_sum > 0.0 { max_logit.exp() / exp_sum } else { 0.0 };
+            
+            confidence_sum += prob;
+            count += 1;
+        }
+    }
+    
+    let avg_conf = if count > 0 { confidence_sum / count as f32 } else { 0.0 };
+    (result.trim().to_string(), avg_conf)
+}
+
+/// Text line with position and text content
+#[derive(Debug, Clone, serde::Serialize)]
+struct TextLine {
+    text: String,
+    confidence: f32,
+    bbox: [f32; 4], // [x1, y1, x2, y2] normalized
+}
+
+/// Run recognition on a single cropped text line
+/// 
+/// Takes raw RGB pixel data of a text crop, resizes to recognition input size,
+/// creates ONNX input tensor, runs inference, and decodes CTC output.
+fn recognize_text_crop(
+    crop_rgb: &[u8],
+    crop_width: u32,
+    crop_height: u32,
+    recognition_session: &std::sync::Arc<std::sync::Mutex<ort::session::Session>>,
+    textline_ori_session: &Option<std::sync::Arc<std::sync::Mutex<ort::session::Session>>>,
+    job_id: &str,
+    box_idx: usize,
+) -> Option<(String, f32)> {
+    use image::imageops::FilterType;
+    
+    // Recognition model expects height=48, width varies (we use 320 with padding)
+    let rec_height = 48u32;
+    let rec_width = 320u32;
+    
+    // Create image from raw bytes
+    let crop_img = image::RgbImage::from_raw(crop_width, crop_height, crop_rgb.to_vec())?;
+    let mut crop_dyn = image::DynamicImage::ImageRgb8(crop_img);
+    
+    // DEBUG: Save raw crop to disk to verify coordinates
+    if box_idx == 0 {
+        let _ = crop_dyn.save(format!("debug_crops/job_{}_box_{}_raw.png", job_id, box_idx));
+    }
+    
+    // --- CRITICAL: Textline orientation detection (0° vs 180°) ---
+    // This fixes garbage output for rotated text by detecting and correcting 180° rotation
+    // Skip for very small crops where orientation is meaningless
+    if let Some(ori_session) = textline_ori_session {
+        if crop_width >= 32 && crop_height >= 16 {
+            info!("DEBUG: Calling detect_textline_orientation for box {}", box_idx);
+            if let Some(needs_rotation) = detect_textline_orientation(crop_rgb, crop_width, crop_height, ori_session) {
+                if needs_rotation {
+                    info!("🔄 Box {}: Detected 180° rotation, correcting", box_idx);
+                    crop_dyn = crop_dyn.rotate180();
+                } else {
+                    info!("✓ Box {}: Orientation correct (0°)", box_idx);
+                }
+            } else {
+                warn!("Box {}: Orientation detection returned None", box_idx);
+            }
+        } else {
+            // Skip orientation for very small crops
+            info!("⏭️  Box {}: Skipping orientation (crop too small: {}x{})", box_idx, crop_width, crop_height);
+        }
+    } else {
+        warn!("Box {}: No textline orientation session available", box_idx);
+    }
+    
+    // Resize preserving aspect ratio
+    let scale = rec_height as f32 / crop_height as f32;
+    let new_width = ((crop_width as f32 * scale).round() as u32).min(rec_width);
+    let resized = crop_dyn.resize(new_width, rec_height, FilterType::Triangle);
+    
+    // Create padded canvas (black padding for standard tensor)
+    // CRITICAL FIX #3: PaddleOCR expects GRAY padding (128), not black (0)
+    // Black padding shifts activation statistics and causes CTC collapse
+    let mut canvas = image::RgbImage::from_pixel(rec_width, rec_height, image::Rgb([128, 128, 128]));
+    let offset_x = 0i64; // Left-align for text
+    image::imageops::overlay(&mut canvas, &resized.to_rgb8(), offset_x, 0);
+
+    // DEBUG: Save processed input to disk
+    if box_idx == 0 {
+        let _ = canvas.save(format!("debug_crops/job_{}_box_{}_input.png", job_id, box_idx));
+    }
+    
+    // Convert to RGB-normalized tensor [-1, 1]
+    // IMPORTANT: PaddleOCR v5 expects RGB normalization, NOT grayscale!
+    // Do NOT broadcast grayscale to 3 channels.
+    let mut float_data = vec![0.0f32; 3 * rec_height as usize * rec_width as usize];
+    for y in 0..rec_height as usize {
+        for x in 0..rec_width as usize {
+            let pixel = canvas.get_pixel(x as u32, y as u32);
+            // Per-channel RGB normalization: (pixel/255 - 0.5) / 0.5
+            for c in 0..3 {
+                let val = pixel[c] as f32 / 255.0;
+                let normalized = (val - 0.5) / 0.5;
+                let idx = c * (rec_height as usize * rec_width as usize) + y * rec_width as usize + x;
+                float_data[idx] = normalized;
+            }
+        }
+    }
+    
+    // Create input tensor (NCHW format)
+    let input_array = ndarray::Array4::<f32>::from_shape_vec(
+        (1, 3, rec_height as usize, rec_width as usize),
+        float_data,
+    ).ok()?;
+    
+    // Run recognition inference
+    let (shape, values) = {
+        let mut session_lock = recognition_session.lock().ok()?;
+        let input_name = session_lock.inputs.first()
+            .map(|i| i.name.clone())
+            .unwrap_or_else(|| "input".to_string());
+        let tensor_ref = ort::value::TensorRef::from_array_view(&input_array).ok()?;
+        let outs = session_lock.run(ort::inputs![input_name.as_str() => tensor_ref]).ok()?;
+        
+        let (_, output_value) = outs.iter().next()?;
+        let array = output_value.try_extract_array::<f32>().ok()?;
+        (array.shape().to_vec(), array.iter().cloned().collect::<Vec<f32>>())
+    };
+    
+    // CTC decode
+    let dictionary = get_paddleocr_dictionary();
+
+    // Vocab check for debugging: log seq/vocab/dict sizes
+    // PaddleOCR v5 outputs [1, vocab_size, seq_len], NOT [1, seq_len, vocab_size]
+    let (vocab_size, seq_len) = match shape.as_slice() {
+        [1, v, s] => (*v, *s),
+        [v, s] => (*v, *s),
+        _ => return Some((String::new(), 0.0)),
+    };
+    info!(vocab_size, seq_len, dict_len = dictionary.len(), "OCR vocab check (recognize_text_crop)");
+
+    let (text, avg_conf) = ctc_decode(&values, &shape, &dictionary);
+
+    Some((text, avg_conf))
+}
 
 // ============================================================================
 // Audio Post-Processing (VAD and Denoising)
@@ -1134,7 +1989,9 @@ pub mod scheduler {
             let mut whitelist = HashSet::new();
             // Default whitelisted models (can be extended via config)
             whitelist.insert("mobilenet_v4".to_string());
-            whitelist.insert("easyocr_en".to_string());
+            whitelist.insert("paddleocr_det".to_string());      // PaddleOCR detection
+            whitelist.insert("paddleocr_rec_en".to_string());   // PaddleOCR English recognition
+            whitelist.insert("paddleocr_en".to_string());       // Combined OCR pipeline
             whitelist.insert("yolo11n".to_string());
             whitelist.insert("segformer".to_string());
             whitelist.insert("silero_vad".to_string());
@@ -1394,14 +2251,31 @@ pub mod worker {
                 "Starting inference execution"
             );
 
-            // Check model exists
+            // Route combined OCR models to the full pipeline (skip model file check for virtual models)
+            // Also route standalone recognition models to combined pipeline to ensure textline orientation is applied
+            if job.model_name == "paddleocr_en" || job.model_name.starts_with("paddleocr_rec") {
+                let execution_result = self.execute_combined_ocr(&job.input_uri, job).await;
+                let latency_ms = start.elapsed().as_millis() as u64;
+                return match execution_result {
+                    Ok(output_uri) => {
+                        info!(job_id = %job.job_id, latency_ms, "OCR pipeline completed successfully");
+                        crate::metrics::INFERENCE_LATENCY_MS.observe(latency_ms as f64);
+                        Ok(InferenceResult::success(job.job_id.clone(), self.node_id, output_uri, latency_ms))
+                    }
+                    Err(e) => {
+                        error!(job_id = %job.job_id, error = %e, "OCR pipeline failed");
+                        Ok(InferenceResult::failure(job.job_id.clone(), self.node_id, e.to_string(), latency_ms))
+                    }
+                };
+            }
+
+            // Check model exists (for regular models)
             let model_path = self.model_dir.join(format!("{}.onnx", job.model_name));
             if !model_path.exists() {
                 return Err(InferenceError::ModelNotFound(job.model_name.clone()));
             }
 
-            // Placeholder: In production, use tflite-rs or tract here
-            // For now, simulate inference with a small delay
+            // Execute regular single-model inference
             let execution_result = self.execute_tflite_inference(&model_path, &job.input_uri, job).await;
 
             let latency_ms = start.elapsed().as_millis() as u64;
@@ -1437,6 +2311,146 @@ pub mod worker {
             }
         }
 
+        /// Execute full OCR pipeline using ocr-rs (MNN-based PaddleOCR v5)
+        /// 
+        /// Uses ocr-rs which provides:
+        /// 1. Det - DBNet text detection (MNN)
+        /// 2. Rec - CRNN text recognition with CTC decoding (MNN)
+        async fn execute_combined_ocr(
+            &self,
+            input_uri: &str,
+            job: &InferenceJob,
+        ) -> Result<String> {
+            use ocr_rs::OcrEngine;
+            
+            info!(job_id = %job.job_id, "🔤 Starting OCR pipeline using ocr-rs (MNN)");
+            
+            let models_dir = std::path::PathBuf::from("./data/iroh/models");
+            let det_path = models_dir.join("paddleocr_det.mnn");
+            let rec_path = models_dir.join("paddleocr_rec_en.mnn");
+            let dict_path = models_dir.join("paddleocr_keys_en.txt");
+            
+            // Check models exist
+            if !det_path.exists() {
+                return Err(InferenceError::ModelNotFound(format!("paddleocr_det.mnn not found at {:?}", det_path)));
+            }
+            if !rec_path.exists() {
+                return Err(InferenceError::ModelNotFound(format!("paddleocr_rec_en.mnn not found at {:?}", rec_path)));
+            }
+            if !dict_path.exists() {
+                return Err(InferenceError::ModelNotFound(format!("paddleocr_keys_en.txt not found at {:?}", dict_path)));
+            }
+            
+            // Load input image
+            let orig_bytes = if input_uri.starts_with("http://") || input_uri.starts_with("https://") {
+                let response = reqwest::get(input_uri).await
+                    .map_err(|e| InferenceError::InputLoadFailed(format!("HTTP request failed: {}", e)))?;
+                response.bytes().await
+                    .map_err(|e| InferenceError::InputLoadFailed(format!("Failed to read response: {}", e)))?
+                    .to_vec()
+            } else if input_uri.starts_with("file://") {
+                let path = input_uri.strip_prefix("file://").unwrap();
+                tokio::fs::read(path).await
+                    .map_err(|e| InferenceError::InputLoadFailed(format!("Failed to read file: {}", e)))?
+            } else {
+                // Assume base64
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, input_uri)
+                    .map_err(|e| InferenceError::InputLoadFailed(format!("Base64 decode failed: {}", e)))?
+            };
+            
+            let img = image::load_from_memory(&orig_bytes)
+                .map_err(|e| InferenceError::InputLoadFailed(format!("Image decode failed: {}", e)))?;
+            
+            let img_width = img.width();
+            let img_height = img.height();
+            info!(job_id = %job.job_id, width = img_width, height = img_height, "📷 Image loaded");
+            
+            // Run OCR in blocking thread (MNN inference is CPU-bound)
+            let det_path_str = det_path.to_string_lossy().to_string();
+            let rec_path_str = rec_path.to_string_lossy().to_string();
+            let dict_path_str = dict_path.to_string_lossy().to_string();
+            let job_id = job.job_id.clone();
+            
+            let ocr_result = tokio::task::spawn_blocking(move || -> std::result::Result<(Vec<(String, f32, [f32; 4])>, u32, u32), InferenceError> {
+                // Create high-level OCR engine (handles detection + recognition in one pass)
+                let engine = OcrEngine::new(
+                    &det_path_str,
+                    &rec_path_str,
+                    &dict_path_str,
+                    None, // Use default config
+                ).map_err(|e| InferenceError::ExecutionFailed(format!("Failed to create OCR engine: {:?}", e)))?;
+                
+                tracing::info!(job_id = %job_id, "✅ OCR engine initialized (MNN)");
+                
+                // Run end-to-end OCR (detection + recognition)
+                let ocr_results = engine.recognize(&img)
+                    .map_err(|e| InferenceError::ExecutionFailed(format!("OCR recognition failed: {:?}", e)))?;
+                
+                tracing::info!(job_id = %job_id, num_results = ocr_results.len(), "📝 OCR completed");
+                
+                // Convert results to our tuple format
+                let results: Vec<(String, f32, [f32; 4])> = ocr_results.iter().map(|r| {
+                    let rect = &r.bbox.rect;
+                    let bbox = [
+                        rect.left() as f32 / img.width() as f32,
+                        rect.top() as f32 / img.height() as f32,
+                        rect.right() as f32 / img.width() as f32,
+                        rect.bottom() as f32 / img.height() as f32,
+                    ];
+                    (r.text.clone(), r.confidence, bbox)
+                }).collect();
+                
+                Ok((results, img.width(), img.height()))
+            }).await.map_err(|e| InferenceError::ExecutionFailed(format!("OCR thread join error: {}", e)))??;
+            
+            let (text_results, width, height) = ocr_result;
+            
+            // Convert results to our format
+            let text_lines: Vec<serde_json::Value> = text_results.iter().map(|(text, confidence, bbox)| {
+                serde_json::json!({
+                    "text": text,
+                    "confidence": confidence,
+                    "bbox": bbox
+                })
+            }).collect();
+            
+            let full_text: String = text_results.iter()
+                .map(|(text, _, _)| text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            
+            let avg_conf: f32 = if text_results.is_empty() {
+                0.0
+            } else {
+                text_results.iter().map(|(_, conf, _)| conf).sum::<f32>() / text_results.len() as f32
+            };
+            
+            info!(
+                job_id = %job.job_id,
+                num_lines = text_results.len(),
+                total_chars = full_text.len(),
+                avg_confidence = avg_conf,
+                image_size = format!("{}x{}", width, height),
+                "✅ OCR pipeline complete (ocr-rs/MNN)"
+            );
+            
+            let output = serde_json::json!({
+                "type": "ocr",
+                "text": full_text,
+                "lines": text_lines,
+                "confidence": avg_conf,
+                "num_lines": text_results.len(),
+                "model": "ocr-rs (PP-OCRv5 MNN)"
+            });
+            
+            let output_json = serde_json::to_string(&output)
+                .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)))?;
+            
+            let temp_result = InferenceResult::success(job.job_id.clone(), self.node_id, String::new(), 0);
+            self.store_blob_with_metadata(&job.job_id, output_json, &temp_result).await
+        }
+
+
         /// Execute ONNX inference using ONNX Runtime (ort)
         ///
         /// Loads the model, processes input, runs inference, and returns output URI.
@@ -1462,8 +2476,20 @@ pub mod worker {
                 // MobileNetV4 expects 256x256
                 (1usize, 3usize, 256usize, 256usize)
             } else if job.model_name.starts_with("yolo") {
+                // YOLOv8/v11 expects 640x640
                 (1usize, 3usize, 640usize, 640usize)
+            } else if job.model_name.starts_with("segformer") {
+                // SegFormer model in this repo expects 512x512 (HxW)
+                (1usize, 3usize, 512usize, 512usize)
+            } else if job.model_name == "paddleocr_det" || job.model_name.starts_with("paddleocr_det") {
+                // PaddleOCR detection: 1280x1280 for better printed text quality
+                (1usize, 3usize, 1280usize, 1280usize)
+            } else if job.model_name.starts_with("paddleocr_rec") || job.model_name == "paddleocr_en" {
+                // PaddleOCR v5 recognition: fixed height 48, width 320 (typical)
+                // PP-OCRv5 uses height 48, v3/v4 used 32
+                (1usize, 3usize, 48usize, 320usize)
             } else {
+                // Default: 224x224 for most classification models
                 (1usize, 3usize, 224usize, 224usize)
             };
 
@@ -1515,6 +2541,29 @@ pub mod worker {
                         float_data[0 * height * width + h * width + w] = b_norm;
                         float_data[1 * height * width + h * width + w] = g_norm;
                         float_data[2 * height * width + h * width + w] = r_norm;
+                    }
+                }
+            } else if job.model_name.starts_with("paddleocr_rec") || job.model_name.starts_with("paddleocr_det") || job.model_name == "paddleocr_en" {
+                // PaddleOCR v5 recognition: use RGB per-channel normalization
+                // DO NOT use grayscale - PaddleOCR v5 expects true RGB
+                // Normalization: (pixel/255 - 0.5) / 0.5 for [-1, 1] range
+                for h in 0..height {
+                    for w in 0..width {
+                        let pixel_idx = (h * width + w) * 3;
+                        
+                        let r = if pixel_idx < input_data.len() { input_data[pixel_idx] } else { 128 };
+                        let g = if pixel_idx + 1 < input_data.len() { input_data[pixel_idx + 1] } else { 128 };
+                        let b = if pixel_idx + 2 < input_data.len() { input_data[pixel_idx + 2] } else { 128 };
+                        
+                        // Per-channel RGB normalization: (pixel/255 - 0.5) / 0.5
+                        let r_norm = (r as f32 / 255.0 - 0.5) / 0.5;
+                        let g_norm = (g as f32 / 255.0 - 0.5) / 0.5;
+                        let b_norm = (b as f32 / 255.0 - 0.5) / 0.5;
+                        
+                        // RGB in NCHW format (Channel 0=R, 1=G, 2=B)
+                        float_data[0 * height * width + h * width + w] = r_norm;
+                        float_data[1 * height * width + h * width + w] = g_norm;
+                        float_data[2 * height * width + h * width + w] = b_norm;
                     }
                 }
             } else {
@@ -1648,6 +2697,34 @@ pub mod worker {
                         .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
                 }
 
+                // Check if this is segmentation output (SegFormer, etc.)
+                if is_segmentation(&shape) {
+                    info!(model = %job_model_name, shape = ?shape, "🎨 Processing segmentation output...");
+                    let seg_result = process_segmentation_output(&values, &shape);
+                    return serde_json::to_string(&seg_result)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
+                }
+
+                // Check if this is PaddleOCR detection output
+                if is_paddleocr_detection(&shape) || job_model_name.starts_with("paddleocr_det") {
+                    info!(model = %job_model_name, shape = ?shape, "📝 Processing PaddleOCR detection output...");
+                    // For standalone detection, use the input dimensions as content size
+                    // (no padding in this path since we don't control the input)
+                    let (det_h, det_w) = match shape.as_slice() {
+                        [1, 1, h, w] => (*h, *w),
+                        _ => (height, width),
+                    };
+                    let boxes = process_paddleocr_detection(&values, &shape, 0.3, det_w, det_h);
+                    let result = serde_json::json!({
+                        "type": "text_detection",
+                        "num_boxes": boxes.len(),
+                        "boxes": boxes,
+                        "note": "Bounding boxes in normalized [x1, y1, x2, y2] format"
+                    });
+                    return serde_json::to_string(&result)
+                        .map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)));
+                }
+
                 // Check if this is ImageNet classification output
                 if is_imagenet_classification(&shape) {
                     let sum: f32 = values.iter().sum();
@@ -1670,7 +2747,9 @@ pub mod worker {
                 }
 
                 // Default: return raw output
-                let result = serde_json::json!({"type": "raw", "shape": shape, "values": values});
+                // Log the shape to help debug why other matchers didn't trigger
+                info!(model = %job_model_name, shape = ?shape, "⚠️ No specific handler matched, returning raw output");
+                let result = serde_json::json!({"type": "raw", "shape": shape, "values_count": values.len()});
                 serde_json::to_string(&result).map_err(|e| InferenceError::ExecutionFailed(format!("JSON serialization failed: {}", e)))
             }).await.map_err(|e| InferenceError::ExecutionFailed(format!("Inference thread join error: {}", e)))?;
 
@@ -1697,15 +2776,39 @@ pub mod worker {
         }
 
         /// Load input data from URI, decode image and resize to target dimensions
+        /// Uses aspect-ratio preserving resize with center padding to avoid distortion
         async fn load_input_data(&self, input_uri: &str, target_width: usize, target_height: usize) -> Result<Vec<u8>> {
             use image::imageops::FilterType;
+            use image::GenericImageView;
 
-            // Helper to decode image bytes, resize and return RGB byte vector
-            // Using Triangle filter instead of Lanczos3 for speed (saves 10-20ms)
-            fn decode_and_resize(bytes: &[u8], w: u32, h: u32) -> std::result::Result<Vec<u8>, String> {
+            // Helper to decode image bytes with aspect-ratio preserving resize and center padding
+            // This prevents character distortion in OCR recognition
+            fn decode_and_resize_preserve_aspect(bytes: &[u8], w: u32, h: u32) -> std::result::Result<Vec<u8>, String> {
                 let img = image::load_from_memory(bytes).map_err(|e| format!("Image decode failed: {}", e))?;
-                let img = img.resize_exact(w, h, FilterType::Triangle).to_rgb8();
-                Ok(img.into_raw())
+                
+                let (orig_w, orig_h) = img.dimensions();
+                
+                // Calculate scale to fit within target dimensions while preserving aspect ratio
+                let scale_w = w as f32 / orig_w as f32;
+                let scale_h = h as f32 / orig_h as f32;
+                let scale = scale_w.min(scale_h);
+                
+                let new_w = (orig_w as f32 * scale).round() as u32;
+                let new_h = (orig_h as f32 * scale).round() as u32;
+                
+                // Resize preserving aspect ratio
+                let resized = img.resize(new_w, new_h, FilterType::Triangle);
+                
+                // Create canvas with padding (gray background for OCR)
+                let mut canvas = image::RgbImage::from_pixel(w, h, image::Rgb([128, 128, 128]));
+                
+                // Center the resized image on the canvas
+                let offset_x = ((w - new_w) / 2) as i64;
+                let offset_y = ((h - new_h) / 2) as i64;
+                
+                image::imageops::overlay(&mut canvas, &resized.to_rgb8(), offset_x, offset_y);
+                
+                Ok(canvas.into_raw())
             }
 
             if input_uri.starts_with("blob://") {
@@ -1718,7 +2821,7 @@ pub mod worker {
                 let path = input_uri.strip_prefix("file://").unwrap();
                 let bytes = tokio::fs::read(path).await
                     .map_err(|e| InferenceError::InputLoadFailed(format!("Failed to read file: {}", e)))?;
-                decode_and_resize(&bytes, target_width as u32, target_height as u32)
+                decode_and_resize_preserve_aspect(&bytes, target_width as u32, target_height as u32)
                     .map_err(|e| InferenceError::InputLoadFailed(e))
             } else if input_uri.starts_with("http://") || input_uri.starts_with("https://") {
                 // Download from URL
@@ -1726,13 +2829,13 @@ pub mod worker {
                     .map_err(|e| InferenceError::InputLoadFailed(format!("HTTP request failed: {}", e)))?;
                 let bytes = response.bytes().await
                     .map_err(|e| InferenceError::InputLoadFailed(format!("Failed to read response: {}", e)))?;
-                decode_and_resize(&bytes, target_width as u32, target_height as u32)
+                decode_and_resize_preserve_aspect(&bytes, target_width as u32, target_height as u32)
                     .map_err(|e| InferenceError::InputLoadFailed(e))
             } else {
                 // Assume base64 encoded image data
                 let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, input_uri)
                     .map_err(|e| InferenceError::InputLoadFailed(format!("Base64 decode failed: {}", e)))?;
-                decode_and_resize(&decoded, target_width as u32, target_height as u32)
+                decode_and_resize_preserve_aspect(&decoded, target_width as u32, target_height as u32)
                     .map_err(|e| InferenceError::InputLoadFailed(e))
             }
         }

@@ -86,6 +86,8 @@ async fn main() -> Result<()> {
                     .add_directive("iroh::magicsock=error".parse().unwrap())
                     // Filter UDP sendmsg errors (IPv6 unreachable, network issues)
                     .add_directive("iroh_quinn_udp=error".parse().unwrap())
+                    // Disable verbose ONNX Runtime logs
+                    .add_directive("ort::logging=error".parse().unwrap())
             }),
         )
         .init();
@@ -417,6 +419,12 @@ async fn main() -> Result<()> {
     }
     let downloaded_count = model_results.iter().filter(|(_, s, _)| *s).count();
     tracing::info!("📦 {} inference models ready", downloaded_count);
+
+    // Preload PaddleOCR dictionary so the worker uses the downloaded file
+    // This forces the OnceLock in `inference` to initialize from the
+    // freshly-downloaded `paddleocr_dict_en.txt` instead of falling back.
+    let dict_len = inference::get_paddleocr_dictionary().len();
+    tracing::info!("📥 Preloaded PaddleOCR dictionary ({} chars)", dict_len);
 
     // Initialize and start inference worker
     // Convert iroh::SecretKey to ed25519_dalek::SigningKey

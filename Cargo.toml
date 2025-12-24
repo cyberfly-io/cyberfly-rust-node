@@ -89,7 +89,10 @@ once_cell = "1.19"
 # ML Inference (ONNX Runtime for better model compatibility)
 ort = { version = "2.0.0-rc.9", features = ["ndarray", "download-binaries"] }
 ndarray = { version = "0.16", features = ["std"] }
-image = "0.24"
+image = "0.25"
+
+# PaddleOCR (MNN-based, PP-OCRv5 support with GPU acceleration)
+ocr-rs = "2.0"
 
 [dev-dependencies]
 # Testing framework

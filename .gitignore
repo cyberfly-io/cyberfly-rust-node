@@ -18,7 +18,7 @@ mosquitto
 .env.*.local
 *.key
 *.pem
-
+/debug_crops
 # Configuration files (may contain sensitive data)
 config.toml
 config.json
