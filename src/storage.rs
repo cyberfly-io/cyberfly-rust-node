@@ -465,12 +465,20 @@ impl BlobStorage {
         // Determine sled DB path
         let sled_path = sled_path.unwrap_or_else(|| PathBuf::from("./data/sled_db"));
         
-        // Production-optimized Sled configuration
-        tracing::info!("Configuring Sled with production settings");
+        // Calculate Sled cache size from environment variable or use sensible default
+        // Default: 256MB (safe for Docker containers with 512MB-1GB RAM)
+        // Override with SLED_CACHE_MB environment variable
+        let cache_mb: u64 = std::env::var("SLED_CACHE_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256);
+        let cache_bytes = cache_mb * 1024 * 1024;
+        
+        tracing::info!("Configuring Sled with cache_mb={} (from SLED_CACHE_MB or default)", cache_mb);
         let sled_config = sled::Config::new()
             .path(&sled_path)
-            // Large cache for hot data (2GB)
-            .cache_capacity(2 * 1024 * 1024 * 1024)
+            // Dynamic cache size (default 256MB, configurable via SLED_CACHE_MB)
+            .cache_capacity(cache_bytes)
             // Batch writes for better throughput (flush every 1 second)
             .flush_every_ms(Some(1000))
             // Use high-throughput mode for write-heavy workloads
@@ -483,7 +491,7 @@ impl BlobStorage {
         let sled_db = sled_config.open()?;
         let index_tree = sled_db.open_tree("storage_index")?;
         
-        tracing::info!("Sled configured: cache=2GB, flush=1s, mode=HighThroughput, compression=enabled");
+        tracing::info!("Sled configured: cache={}MB, flush=1s, mode=HighThroughput, compression=enabled", cache_mb);
 
         // Create tiered cache with Arc for zero-copy reads
         // Hot tier: 5k entries, 5min TTL (most frequent)

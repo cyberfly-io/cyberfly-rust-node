@@ -228,8 +228,9 @@ async fn main() -> Result<()> {
     };
 
     // Create blob storage
+    tracing::info!("🔧 Loading blob store from {:?}...", data_dir);
     let store = iroh_blobs::store::fs::FsStore::load(&data_dir).await?;
-    tracing::info!("Blob store loaded from {:?}", data_dir);
+    tracing::info!("✅ Blob store loaded from {:?}", data_dir);
 
     // Create blobs protocol handler
     let blobs = iroh_blobs::BlobsProtocol::new(&store, None);
@@ -247,9 +248,10 @@ async fn main() -> Result<()> {
     tracing::info!("Iroh router spawned with shared components");
 
     // Initialize BlobStorage (Redis-like API on top of blob storage)
+    tracing::info!("🔧 Initializing BlobStorage with Sled DB...");
     let sled_db_path = data_dir.join("sled_db");
     let storage = storage::BlobStorage::new(store.clone(), Some(sled_db_path)).await?;
-    tracing::info!("BlobStorage initialized (Redis-like API on blob store)");
+    tracing::info!("✅ BlobStorage initialized (Redis-like API on blob store)");
 
     // Initialize IpfsStorage using shared Iroh components
     let ipfs = ipfs::IpfsStorage::from_components(router.clone(), blobs.clone(), store.clone());
