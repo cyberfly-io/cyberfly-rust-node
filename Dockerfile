@@ -7,29 +7,23 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
-    && rm -rf /var/lib/apt/lists/* && \
-    useradd -m -s /bin/bash cyberfly
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Create data directory and set ownership
-RUN mkdir -p /app/data/iroh && \
-    chown -R cyberfly:cyberfly /app
+# Create data directory
+RUN mkdir -p /app/data/iroh
 
 # Copy pre-built binary (path set by build context)
 ARG TARGETARCH
-COPY --chown=cyberfly:cyberfly cyberfly-rust-node-${TARGETARCH} /app/cyberfly-rust-node
-COPY --chown=cyberfly:cyberfly schema.graphql /app/schema.graphql
+COPY cyberfly-rust-node-${TARGETARCH} /app/cyberfly-rust-node
+COPY schema.graphql /app/schema.graphql
 
 # Ensure binary is executable
 RUN chmod +x /app/cyberfly-rust-node
 
-# Switch to non-root user
-USER cyberfly
-
 # Expose ports
 EXPOSE 31001 31002 31003 31006
-
 
 # Run the application
 CMD ["/app/cyberfly-rust-node"]
