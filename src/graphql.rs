@@ -1894,51 +1894,54 @@ impl QueryRoot {
             .map(|entry| (*entry.key(), entry.value().0, entry.value().1))
             .collect();
 
-        Ok(peers
-            .into_iter()
-            .map(|(node_id, last_seen, stored_addr)| {
-                // Get connection type info from endpoint
-                let (conn_type_info, is_connected) = if let Some(ep) = endpoint {
-                    if let Some(mut conn_type_watcher) = ep.conn_type(node_id) {
-                        use iroh::Watcher;
-                        let conn_type = conn_type_watcher.get();
-                        let connected = !matches!(conn_type, iroh::endpoint::ConnectionType::None);
-                        (Some(conn_type), connected)
-                    } else {
-                        (None, false)
-                    }
-                } else {
-                    (None, false)
-                };
-
-                // Try to get address from stored value first, then from connection type
-                let address = stored_addr
-                    .map(|a| a.to_string())
-                    .or_else(|| {
-                        conn_type_info.and_then(|conn_type| {
-                            match conn_type {
-                                iroh::endpoint::ConnectionType::Direct(addr) => Some(addr.to_string()),
-                                iroh::endpoint::ConnectionType::Mixed(addr, _) => Some(addr.to_string()),
-                                _ => None,
+        // iroh 0.98 removed `conn_type()`/`ConnectionType`; use `remote_info()` (async)
+        // and examine the list of transport addresses for active usage.
+        let mut out = Vec::with_capacity(peers.len());
+        for (node_id, last_seen, stored_addr) in peers {
+            let (is_connected, discovered_addr) = if let Some(ep) = endpoint {
+                match ep.remote_info(node_id).await {
+                    Some(info) => {
+                        let mut connected = false;
+                        let mut direct_ip: Option<String> = None;
+                        let mut relay_str: Option<String> = None;
+                        for a in info.addrs() {
+                            if matches!(a.usage(), iroh::endpoint::TransportAddrUsage::Active) {
+                                connected = true;
+                                match a.addr() {
+                                    iroh::TransportAddr::Ip(s) if direct_ip.is_none() => {
+                                        direct_ip = Some(s.to_string());
+                                    }
+                                    iroh::TransportAddr::Relay(url) if relay_str.is_none() => {
+                                        relay_str = Some(format!("relay:{url}"));
+                                    }
+                                    _ => {}
+                                }
                             }
-                        })
-                    });
-                
-                // Connection status based on actual connection type
-                let connection_status = if is_connected {
-                    "connected".to_string()
-                } else {
-                    "disconnected".to_string()
-                };
-
-                PeerInfo {
-                    peer_id: node_id.to_string(),
-                    last_seen: last_seen.to_rfc3339(),
-                    connection_status,
-                    address,
+                        }
+                        (connected, direct_ip.or(relay_str))
+                    }
+                    None => (false, None),
                 }
-            })
-            .collect())
+            } else {
+                (false, None)
+            };
+
+            let address = stored_addr.map(|a| a.to_string()).or(discovered_addr);
+
+            let connection_status = if is_connected {
+                "connected".to_string()
+            } else {
+                "disconnected".to_string()
+            };
+
+            out.push(PeerInfo {
+                peer_id: node_id.to_string(),
+                last_seen: last_seen.to_rfc3339(),
+                connection_status,
+                address,
+            });
+        }
+        Ok(out)
     }
 
     /// Get detailed peer mesh summary from PeerRegistry
@@ -3032,12 +3035,29 @@ impl MutationRoot {
 
         match connect_result {
             Ok(Ok(conn)) => {
-                // Get the actual remote address from the connection if possible
-                let conn_type_str = if let Some(mut watcher) = endpoint.conn_type(endpoint_id) {
-                    use iroh::Watcher;
-                    format!("{}", watcher.get())
-                } else {
-                    "unknown".to_string()
+                // Get the actual remote connection info if possible.
+                // iroh 0.98 removed `conn_type()`; summarise from `remote_info()`.
+                let conn_type_str = match endpoint.remote_info(endpoint_id).await {
+                    Some(info) => {
+                        let mut parts: Vec<String> = Vec::new();
+                        let mut active = false;
+                        for a in info.addrs() {
+                            if matches!(a.usage(), iroh::endpoint::TransportAddrUsage::Active) {
+                                active = true;
+                                match a.addr() {
+                                    iroh::TransportAddr::Ip(s) => parts.push(format!("direct:{s}")),
+                                    iroh::TransportAddr::Relay(url) => parts.push(format!("relay:{url}")),
+                                    other => parts.push(format!("{other}")),
+                                }
+                            }
+                        }
+                        if !active {
+                            "unknown".to_string()
+                        } else {
+                            parts.join(",")
+                        }
+                    }
+                    None => "unknown".to_string(),
                 };
 
                 tracing::info!("GraphQL: Successfully connected to peer: {} via {}", peer_id, conn_type_str);

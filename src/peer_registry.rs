@@ -483,15 +483,12 @@ mod tests {
     use super::*;
 
     fn test_node_id() -> EndpointId {
-        // Use thread_rng which provides CryptoRng
-        let mut rng = rand::thread_rng();
-        let secret = iroh::SecretKey::generate(&mut rng);
+        let secret = iroh::SecretKey::generate();
         secret.public()
     }
 
     fn other_node_id() -> EndpointId {
-        let mut rng = rand::thread_rng();
-        let secret = iroh::SecretKey::generate(&mut rng);
+        let secret = iroh::SecretKey::generate();
         secret.public()
     }
 

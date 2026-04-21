@@ -25,7 +25,10 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use anyhow::Result;
 use axum::{routing::get, Router};
-use iroh::discovery::pkarr::dht::DhtDiscovery;
+// iroh 0.98 renamed `discovery` → `address_lookup` (see release notes).
+use iroh::address_lookup::pkarr::dht::DhtAddressLookup;
+use iroh::address_lookup::mdns::MdnsAddressLookup;
+use iroh::endpoint::presets;
 // Arc used in places during runtime; prefix to avoid unused import warning in some builds
 #[allow(unused_imports)]
 use std::sync::Arc;
@@ -145,9 +148,8 @@ async fn main() -> Result<()> {
             let key_bytes = tokio::fs::read(&key_path).await?;
             iroh::SecretKey::try_from(&key_bytes[0..32])?
         } else {
-            // thread_rng is deprecated in some dependency versions; silence the local deprecation warning
-            #[allow(deprecated)]
-            let key = iroh::SecretKey::generate(&mut rand::thread_rng());
+            // iroh 0.98: SecretKey::generate() no longer takes an RNG argument.
+            let key = iroh::SecretKey::generate();
             tokio::fs::write(&key_path, key.to_bytes()).await?;
             tracing::info!("Generated new Iroh secret key");
             key
@@ -159,16 +161,18 @@ async fn main() -> Result<()> {
         std::net::Ipv4Addr::UNSPECIFIED, // 0.0.0.0 - listen on all interfaces
         31001,                           // Fixed port for bootstrap configuration
     );
-    let dht_discovery = DhtDiscovery::builder();
-    let mdns = iroh::discovery::mdns::MdnsDiscovery::builder();
+    let dht_discovery = DhtAddressLookup::builder();
+    let mdns = MdnsAddressLookup::builder();
 
     // Clone secret key for later use in inference worker (before it's consumed by endpoint builder)
     let secret_key_clone = secret_key.clone();
 
-    let endpoint = iroh::Endpoint::builder()
+    // iroh 0.98: Endpoint::builder now takes a preset; presets::N0 keeps n0's default relays
+    // and DNS address-lookup. `discovery(...)` was renamed to `address_lookup(...)`.
+    let endpoint = iroh::Endpoint::builder(presets::N0)
         .secret_key(secret_key)
-        .discovery(dht_discovery)
-        .discovery(mdns)
+        .address_lookup(dht_discovery)
+        .address_lookup(mdns)
         .relay_mode(iroh::RelayMode::Default) // Use n0's default relay servers for NAT traversal
         .bind_addr_v4(bind_addr) // Bind to fixed port 31001 for bootstrap peer connectivity
         .bind()

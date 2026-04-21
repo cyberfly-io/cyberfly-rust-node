@@ -539,6 +539,18 @@ impl IrohNetwork {
         Ok(())
     }
     
+    /// Returns `true` if the endpoint has any actively-used transport address
+    /// to the given remote. Replaces the removed `Endpoint::conn_type()` API
+    /// from iroh < 0.98.
+    async fn is_remote_active(endpoint: &Endpoint, node_id: EndpointId) -> bool {
+        match endpoint.remote_info(node_id).await {
+            Some(info) => info
+                .addrs()
+                .any(|a| matches!(a.usage(), iroh::endpoint::TransportAddrUsage::Active)),
+            None => false,
+        }
+    }
+
     /// Monitor bootstrap peer connections and reconnect if disconnected
     /// Also keeps bootstrap peers in discovered_peers to prevent them from being used for peer sharing
     async fn monitor_bootstrap_connections(
@@ -560,16 +572,16 @@ impl IrohNetwork {
             // Check ACTUAL connection states, not just discovered_peers map
             // discovered_peers can have stale entries between NeighborDown and cleanup
             let active_peer_count = discovered_peers.len();
-            
-            // Double-check with actual connection types for bootstrap peers
-            let connected_bootstrap_count = bootstrap_peers.iter().filter(|(node_id, _)| {
-                if let Some(mut watcher) = endpoint.conn_type(*node_id) {
-                    use iroh::endpoint::ConnectionType;
-                    !matches!(watcher.get(), ConnectionType::None)
-                } else {
-                    false
+
+            // Double-check with actual connection state for bootstrap peers.
+            // iroh 0.98 removed `conn_type()`/`ConnectionType`; use `remote_info()` and
+            // check whether any transport address is currently Active.
+            let mut connected_bootstrap_count = 0usize;
+            for (node_id, _) in &bootstrap_peers {
+                if Self::is_remote_active(&endpoint, *node_id).await {
+                    connected_bootstrap_count += 1;
                 }
-            }).count();
+            }
             
             // If we have ANY active peers or any connected bootstrap nodes, attempt
             // to reconnect only the disconnected bootstrap peers instead of treating
@@ -586,13 +598,8 @@ impl IrohNetwork {
                     let socket_addr_clone = *socket_addr;
                     let discovered_peers_clone = Arc::clone(&discovered_peers);
 
-                    // Check connection type; if disconnected, attempt reconnect
-                    let is_connected = if let Some(mut watcher) = endpoint.conn_type(*node_id) {
-                        use iroh::endpoint::ConnectionType;
-                        !matches!(watcher.get(), ConnectionType::None)
-                    } else {
-                        false
-                    };
+                    // Check connection state; if disconnected, attempt reconnect
+                    let is_connected = Self::is_remote_active(&endpoint, *node_id).await;
 
                     if !is_connected {
                         tracing::warn!(%node_id_clone, "Bootstrap peer disconnected - attempting reconnect");

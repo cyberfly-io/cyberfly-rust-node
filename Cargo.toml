@@ -36,11 +36,13 @@ openssl-sys = { version = "0.9", features = ["vendored"] }
 automerge = "0.6"
 
 # IPFS - Using Iroh (modern Rust IPFS implementation)
-# Updated to 0.95.1 - new relay, error handling, and connection API improvements
-iroh = { version = "0.95", features = ["discovery-local-network", "discovery-pkarr-dht"] }
-iroh-blobs = "0.97"
-iroh-gossip = "0.95"
-# iroh-docs = "0.95"  # Temporarily disabled due to redb version conflict
+# Upgraded to 0.98.x - see https://www.iroh.computer/blog/iroh-0-98-0-getting-back-to-traversing-nats
+# Feature flags `discovery-*` were renamed to `address-lookup-*`.
+iroh = { version = "0.98", features = ["address-lookup-mdns", "address-lookup-pkarr-dht"] }
+# iroh-blobs 0.100 is the release compatible with iroh 0.98.
+iroh-blobs = "0.100"
+iroh-gossip = "0.98"
+# iroh-docs = "0.98"  # Temporarily disabled due to redb version conflict
 dashmap = "6.0"
 
 # MQTT

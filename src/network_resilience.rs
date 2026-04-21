@@ -954,15 +954,12 @@ mod tests {
     use super::*;
 
     fn test_peer_id() -> EndpointId {
-        // Use thread_rng to generate a valid ed25519 key
-        let mut rng = rand::thread_rng();
-        let secret = iroh::SecretKey::generate(&mut rng);
+        let secret = iroh::SecretKey::generate();
         secret.public()
     }
 
     fn test_peer_id_2() -> EndpointId {
-        let mut rng = rand::thread_rng();
-        let secret = iroh::SecretKey::generate(&mut rng);
+        let secret = iroh::SecretKey::generate();
         secret.public()
     }
 
