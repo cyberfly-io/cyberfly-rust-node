@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
         .address_lookup(dht_discovery)
         .address_lookup(mdns)
         .relay_mode(iroh::RelayMode::Default) // Use n0's default relay servers for NAT traversal
-        .bind_addr_v4(bind_addr) // Bind to fixed port 31001 for bootstrap peer connectivity
+        .bind_addr(std::net::SocketAddr::V4(bind_addr))? // Bind to fixed port 31001 for bootstrap peer connectivity
         .bind()
         .await?;
 
